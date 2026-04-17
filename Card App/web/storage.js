@@ -1,4 +1,5 @@
 const STORAGE_KEY = "sports-card-scanner-mvp-web/v1";
+const SAVE_TIMEOUT_MS = 80;
 
 const defaultState = {
   catalogCards: [],
@@ -15,6 +16,9 @@ const defaultState = {
 function cloneDefaultState() {
   return JSON.parse(JSON.stringify(defaultState));
 }
+
+let pendingState = null;
+let saveScheduled = false;
 
 export function loadState() {
   try {
@@ -39,7 +43,13 @@ export function loadState() {
 }
 
 export function saveState(state) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  pendingState = state;
+  if (saveScheduled) {
+    return;
+  }
+
+  saveScheduled = true;
+  scheduleSaveFlush();
 }
 
 export function resetCatalog(state) {
@@ -70,4 +80,34 @@ export function createId(prefix) {
 
 export function latestSession(state) {
   return state.scanSessions[state.scanSessions.length - 1] || null;
+}
+
+function scheduleSaveFlush() {
+  const flush = () => {
+    saveScheduled = false;
+    const snapshot = pendingState;
+    pendingState = null;
+
+    if (!snapshot) {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    } catch (error) {
+      console.warn("Could not save the latest app state.", error);
+    }
+
+    if (pendingState) {
+      saveScheduled = true;
+      scheduleSaveFlush();
+    }
+  };
+
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(flush, { timeout: SAVE_TIMEOUT_MS });
+    return;
+  }
+
+  window.setTimeout(flush, SAVE_TIMEOUT_MS);
 }

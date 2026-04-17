@@ -18,8 +18,6 @@ import {
   loadImageFile,
   loadImageSource,
   runOcr,
-  waitForOpenCv,
-  waitForTesseract,
 } from "./scanner.js";
 import {
   createId,
@@ -95,7 +93,7 @@ const refs = {
 
 bindEvents();
 bootstrapEngines();
-registerServiceWorker();
+cleanupCachedShell();
 render();
 applyLaunchPreset();
 
@@ -202,10 +200,6 @@ function bindEvents() {
 
 async function bootstrapEngines() {
   refs.engineStatus.textContent = getEngineStatusText();
-
-  Promise.allSettled([waitForOpenCv(), waitForTesseract()]).finally(() => {
-    refs.engineStatus.textContent = getEngineStatusText();
-  });
 }
 
 function triggerImagePicker() {
@@ -276,12 +270,15 @@ async function handleImageSelected(event) {
   render();
 }
 
-function handleGenerateDemoImage() {
+async function handleGenerateDemoImage() {
   const mode = state.appSettings.lastScanMode || "page";
   if (!state.catalogCards.length) {
     loadDemoCatalog();
   }
 
+  setStatus(mode === "single" ? "Building a demo card..." : "Building a demo page...");
+  render();
+  await pauseForUi();
   const demoImage = generateDemoImage(mode);
   refs.imageInput.value = "";
   ui.pendingSourcePreview = {
@@ -303,40 +300,49 @@ function applyLaunchPreset() {
   const demoMode = params.get("demo");
   const seedDemo = params.get("seed") === "1";
   const requestedScreen = params.get("screen") || window.location.hash.replace(/^#/, "");
-  if (seedDemo) {
-    seedDemoResults();
-  }
-  if (!demoMode) {
+  const openRequestedScreen = () => {
     if (requestedScreen && refs.screens.some((screen) => screen.dataset.screen === requestedScreen)) {
       showScreen(requestedScreen);
     }
+  };
+
+  if (seedDemo) {
+    window.setTimeout(async () => {
+      await seedDemoResults();
+      openRequestedScreen();
+    }, 0);
     return;
   }
 
-  state.appSettings.lastScanMode = demoMode === "single" ? "single" : "page";
-  saveState(state);
-  loadDemoCatalog();
-  handleGenerateDemoImage();
-
-  if (params.get("autorun") === "1") {
-    window.setTimeout(() => {
-      handleScan();
-    }, 120);
+  if (!demoMode) {
+    openRequestedScreen();
+    return;
   }
 
-  if (requestedScreen && refs.screens.some((screen) => screen.dataset.screen === requestedScreen)) {
-    showScreen(requestedScreen);
-  }
+  window.setTimeout(async () => {
+    state.appSettings.lastScanMode = demoMode === "single" ? "single" : "page";
+    saveState(state);
+    loadDemoCatalog();
+    await handleGenerateDemoImage();
+
+    if (params.get("autorun") === "1") {
+      window.setTimeout(() => {
+        handleScan();
+      }, 120);
+    }
+
+    openRequestedScreen();
+  }, 0);
 }
 
-function seedDemoResults() {
+async function seedDemoResults() {
   const parsed = parseCatalogCsv(buildDemoCatalogCsv());
   const cards = parsed.cards;
   const startedAt = new Date().toISOString();
   const session = {
     sessionId: "demo_session_seeded",
     sourceName: "demo-seeded-session",
-    sourceDataUrl: generateDemoImage("page").dataUrl,
+    sourceDataUrl: "",
     mode: "page",
     startedAt,
     status: "review",
@@ -352,8 +358,15 @@ function seedDemoResults() {
   state.appSettings.lastCatalogErrors = [];
   state.appSettings.lastCollectionFilter = "all";
   ui.collectionFilter = "all";
+  setStatus("Loading demo cards...");
+  render();
 
-  cards.forEach((card, index) => {
+  for (let index = 0; index < cards.length; index += 1) {
+    if (index > 0 && index % 2 === 0) {
+      await pauseForUi();
+    }
+
+    const card = cards[index];
     const asset = generateDemoCardAsset(card.catalogCardId);
     const cropId = `demo_crop_${index + 1}`;
     const confirmed = index < 4;
@@ -400,8 +413,8 @@ function seedDemoResults() {
       bounds: {
         left: 0,
         top: 0,
-        right: 700,
-        bottom: 980,
+        right: 460,
+        bottom: 644,
       },
       note: confirmed ? "Demo card already saved." : "Demo card still needs a quick check.",
       ocrText: `${card.year} ${card.brand} ${card.setName} ${card.playerName} ${card.cardNumber} ${card.teamName}`,
@@ -434,7 +447,7 @@ function seedDemoResults() {
         : null,
       collectionCardId,
     });
-  });
+  }
 
   state.scanSessions = [session];
   ui.selectedCropId = session.crops.find((crop) => crop.reviewStatus === "pending")?.cropId || session.crops[0]?.cropId || null;
@@ -462,6 +475,8 @@ async function handleScan() {
   try {
     const mode = state.appSettings.lastScanMode || "page";
     setStatus("Getting your photo ready...");
+    render();
+    await pauseForUi();
     const loaded = file
       ? await loadImageFile(file)
       : await loadImageSource(previewSource.dataUrl, previewSource.name);
@@ -485,8 +500,10 @@ async function handleScan() {
     render();
 
     setStatus(mode === "page" ? "Looking for cards on the page..." : "Using one-card mode...");
+    render();
     const detectedCrops = await detectCropsFromImage(loaded.dataUrl, mode);
     setStatus(`Found ${detectedCrops.length} ${detectedCrops.length === 1 ? "card" : "cards"}. Reading the text now...`);
+    render();
 
     for (let index = 0; index < detectedCrops.length; index += 1) {
       const detectedCrop = detectedCrops[index];
@@ -519,6 +536,10 @@ async function handleScan() {
       saveState(state);
       render();
       setStatus(`Read card ${index + 1} of ${detectedCrops.length}.`);
+
+      if (index < detectedCrops.length - 1) {
+        await pauseForUi();
+      }
     }
 
     session.status = "review";
@@ -902,7 +923,7 @@ function renderCropCard(crop, session, showScanInfo) {
 
   return `
     <button type="button" class="recent-card" data-crop-id="${crop.cropId}">
-      <img src="${crop.imageDataUrl}" alt="Card preview" />
+      <img src="${crop.imageDataUrl}" alt="Card preview" loading="lazy" decoding="async" />
       <div class="recent-card__meta">
         <span class="recent-card__title">${escapeHtml(matchedCard?.playerName || "Card not named yet")}</span>
         <span class="recent-card__sub">${escapeHtml(
@@ -933,7 +954,7 @@ function renderCollectionCards(cards) {
       const latestSnapshot = findLatestSnapshot(card);
       return `
         <article class="collection-card">
-          <img src="${card.imageDataUrl}" alt="Saved card" />
+          <img src="${card.imageDataUrl}" alt="Saved card" loading="lazy" decoding="async" />
           <div class="collection-card__meta">
             <span class="collection-card__title">${escapeHtml(card.playerNameSnapshot || "Card not named yet")}</span>
             <span class="collection-card__sub">${escapeHtml(
@@ -964,7 +985,7 @@ function renderReviewPane(allCrops) {
         .map(
           (entry) => `
             <button type="button" class="review-crop-pill ${entry.crop.cropId === selected.crop.cropId ? "review-crop-pill--selected" : ""}" data-crop-id="${entry.crop.cropId}">
-              <img src="${entry.crop.imageDataUrl}" alt="Card to review" />
+              <img src="${entry.crop.imageDataUrl}" alt="Card to review" loading="lazy" decoding="async" />
               <span class="review-crop-pill__status">${escapeHtml(humanReviewStatus(entry.crop.reviewStatus))}</span>
             </button>
           `,
@@ -973,7 +994,7 @@ function renderReviewPane(allCrops) {
     </div>
     <div class="review-focus">
       <div class="review-focus__image">
-        <img src="${selected.crop.imageDataUrl}" alt="Selected card" />
+        <img src="${selected.crop.imageDataUrl}" alt="Selected card" decoding="async" />
       </div>
       <div class="badge-row">
         <span class="badge badge--${humanReviewBadgeClass(selected.crop.reviewStatus)}">${escapeHtml(humanReviewStatus(selected.crop.reviewStatus))}</span>
@@ -1261,16 +1282,34 @@ function setStatus(message) {
   refs.statusBanner.textContent = ui.statusMessage;
 }
 
-function registerServiceWorker() {
-  if (!("serviceWorker" in navigator)) {
+async function cleanupCachedShell() {
+  if ("serviceWorker" in navigator) {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(
+        registrations
+          .filter((registration) => registration.active?.scriptURL.includes("service-worker"))
+          .map((registration) => registration.unregister()),
+      );
+    } catch (error) {
+      console.warn("Could not clear old service workers.", error);
+    }
+  }
+
+  if (!("caches" in window)) {
     return;
   }
 
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("./service-worker.js").catch((error) => {
-      console.warn("Service worker registration failed.", error);
-    });
-  });
+  try {
+    const keys = await window.caches.keys();
+    await Promise.all(
+      keys
+        .filter((key) => key.startsWith("sports-card-scanner-shell"))
+        .map((key) => window.caches.delete(key)),
+    );
+  } catch (error) {
+    console.warn("Could not clear old app caches.", error);
+  }
 }
 
 function formatCurrency(value) {
@@ -1322,5 +1361,11 @@ function fileToDataUrl(file) {
     reader.onload = () => resolve(reader.result);
     reader.onerror = () => reject(reader.error || new Error("Could not preview that photo."));
     reader.readAsDataURL(file);
+  });
+}
+
+function pauseForUi() {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, 0);
   });
 }

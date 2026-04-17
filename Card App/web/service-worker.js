@@ -1,66 +1,29 @@
-const CACHE_NAME = "sports-card-scanner-shell-v2";
-const APP_ASSETS = [
-  "./",
-  "./index.html",
-  "./styles.css",
-  "./app.js",
-  "./catalog.js",
-  "./demo-data.js",
-  "./pricing.js",
-  "./scanner.js",
-  "./storage.js",
-  "./manifest.webmanifest",
-  "./catalog-template.csv",
-  "./assets/logo-badge.svg",
-];
-
-self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_ASSETS)),
-  );
+self.addEventListener("install", () => {
   self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(
+    (async () => {
+      const keys = await caches.keys();
+      await Promise.all(
         keys
-          .filter((key) => key !== CACHE_NAME)
+          .filter((key) => key.startsWith("sports-card-scanner-shell"))
           .map((key) => caches.delete(key)),
-      ),
-    ),
-  );
-  self.clients.claim();
-});
+      );
 
-self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET") {
-    return;
-  }
+      await self.registration.unregister();
 
-  const requestUrl = new URL(event.request.url);
-  if (requestUrl.pathname.startsWith("/.netlify/functions/")) {
-    return;
-  }
-
-  event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-
-      return fetch(event.request)
-        .then((networkResponse) => {
-          if (!networkResponse || networkResponse.status !== 200 || networkResponse.type === "opaque") {
-            return networkResponse;
+      const clients = await self.clients.matchAll({ includeUncontrolled: true, type: "window" });
+      await Promise.all(
+        clients.map((client) => {
+          if ("navigate" in client) {
+            return client.navigate(client.url);
           }
 
-          const responseClone = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseClone));
-          return networkResponse;
-        })
-        .catch(() => caches.match("./index.html"));
-    }),
+          return Promise.resolve();
+        }),
+      );
+    })(),
   );
 });
