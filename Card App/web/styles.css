@@ -778,6 +778,28 @@ img {
   cursor: pointer;
 }
 
+.candidate-card__row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.candidate-card__thumb {
+  width: 72px;
+  aspect-ratio: 5 / 7;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.candidate-card__copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
 .input-group {
   display: grid;
   gap: 8px;
@@ -808,6 +830,37 @@ textarea::placeholder {
 .pricing-card {
   display: grid;
   gap: 10px;
+}
+
+.pricing-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pricing-stat {
+  padding: 12px 10px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  display: grid;
+  gap: 5px;
+}
+
+.pricing-stat span {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+
+.pricing-stat strong {
+  font-size: 1rem;
+  line-height: 1.1;
+}
+
+.pricing-stat--feature {
+  background: rgba(78, 142, 247, 0.12);
+  border-color: rgba(114, 162, 255, 0.4);
 }
 
 .bottom-nav {

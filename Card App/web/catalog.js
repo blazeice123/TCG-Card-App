@@ -125,12 +125,12 @@ export function summarizeCatalog(cards, errors) {
   if (!cards.length) {
     return errors.length
       ? `We could not use any cards from that sheet yet. ${errors.length} line${errors.length === 1 ? "" : "s"} still need fixing.`
-      : "Your list is empty.";
+      : "No personal sheet loaded. That is okay. Scanning still works without it.";
   }
 
   const sports = new Set(cards.map((card) => card.sport));
   const latestYear = Math.max(...cards.map((card) => card.year));
-  return `You have ${cards.length} cards in your list across ${sports.size} sport${sports.size === 1 ? "" : "s"}. Newest card year: ${latestYear}.`;
+  return `You have ${cards.length} cards in your personal sheet across ${sports.size} sport${sports.size === 1 ? "" : "s"}. Newest card year: ${latestYear}.`;
 }
 
 export function tokenize(value) {

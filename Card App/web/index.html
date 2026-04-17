@@ -6,7 +6,7 @@
     <title>Card Scanner</title>
     <meta
       name="description"
-      content="Snap sports cards, save the right card, and keep a clean collection with quick value checks."
+      content="Snap sports cards, find the closest eBay card, and save a quick sold range to your collection."
     />
     <meta name="theme-color" content="#162448" />
     <link rel="icon" href="./assets/logo-badge.svg" type="image/svg+xml" />
@@ -43,16 +43,16 @@
           <section class="action-strip">
             <button id="scanActionButton" class="action-button" type="button">
               <span class="action-button__icon action-button__icon--camera" aria-hidden="true"></span>
-              <span>Scan Cards</span>
+              <span>Scan Many</span>
             </button>
             <button id="manualActionButton" class="action-button action-button--secondary" type="button">
               <span class="action-button__icon action-button__icon--plus" aria-hidden="true"></span>
-              <span>Add One</span>
+              <span>Scan One</span>
             </button>
           </section>
 
           <div id="statusBanner" class="status-banner">
-            Start with one full photo. If that gets messy, snap one card at a time.
+            Start with one clear photo. We will find close eBay cards, then show the sold range after you pick the right one.
           </div>
 
           <main class="screen-stack">
@@ -90,7 +90,7 @@
                     <h2>My Collection</h2>
                     <p id="collectionSummary" class="section-copy">Cards you save show up here.</p>
                   </div>
-                  <button class="section-link" type="button" data-screen-jump="catalog">My List</button>
+                  <button class="section-link" type="button" data-screen-jump="catalog">Tools</button>
                 </div>
                 <div id="collectionFilters" class="filter-row">
                   <button type="button" class="filter-chip filter-chip--active" data-filter="all">All</button>
@@ -111,7 +111,7 @@
                   </div>
                 </div>
                 <div id="scanModeRow" class="filter-row">
-                  <button type="button" class="filter-chip filter-chip--active" data-scan-mode="page">Full Photo</button>
+                  <button type="button" class="filter-chip filter-chip--active" data-scan-mode="page">Multiple Cards</button>
                   <button type="button" class="filter-chip" data-scan-mode="single">Single Card</button>
                 </div>
                 <div class="button-row">
@@ -151,8 +151,8 @@
               <section class="content-block">
                 <div class="section-heading">
                   <div>
-                    <h2>Pick the Right Card</h2>
-                    <p id="reviewSummary" class="section-copy">We suggest. You decide.</p>
+                    <h2>Pick Your Card</h2>
+                    <p id="reviewSummary" class="section-copy">We find close eBay cards. You pick the winner.</p>
                   </div>
                 </div>
                 <div id="reviewPane" class="review-pane"></div>
@@ -163,20 +163,35 @@
               <section class="content-block">
                 <div class="section-heading">
                   <div>
-                    <h2>My List</h2>
-                    <p class="section-copy">Keep this short and real so the app guesses better.</p>
+                    <h2>Tools</h2>
+                    <p class="section-copy">Sample data, exports, and your own personal sheet live here.</p>
                   </div>
                   <a class="section-link" href="./catalog-template.csv" download>Blank Sheet</a>
                 </div>
+                <div class="support-card">
+                  <strong>Your personal sheet is optional</strong>
+                  <div class="small-copy">
+                    Scanning now works from the card photo and eBay search. Your own sheet is just a handy extra if you want it.
+                  </div>
+                </div>
+              </section>
+
+              <section class="content-block">
+                <div class="section-heading">
+                  <div>
+                    <h2>Personal Sheet</h2>
+                    <p class="section-copy">Keep a short sheet of cards you care about. It is not required for scanning.</p>
+                  </div>
+                </div>
                 <div class="button-row">
-                  <button id="catalogImportButton" class="button button--primary" type="button">Add My List</button>
-                  <button id="demoCatalogButton" class="button button--ghost" type="button">Load Sample Cards</button>
+                  <button id="catalogImportButton" class="button button--primary" type="button">Add My Sheet</button>
+                  <button id="demoCatalogButton" class="button button--ghost" type="button">Load Sample Sheet</button>
                   <button id="loadTemplateButton" class="button button--ghost" type="button">Open Blank Sheet</button>
-                  <button id="resetCatalogButton" class="button button--ghost" type="button">Clear My List</button>
+                  <button id="resetCatalogButton" class="button button--ghost" type="button">Clear My Sheet</button>
                 </div>
                 <div id="catalogSummary" class="support-card"></div>
                 <div class="meta-strip">
-                  <div class="meta-pill"><span>My List</span><strong id="catalogCountMeta">0</strong></div>
+                  <div class="meta-pill"><span>My Sheet</span><strong id="catalogCountMeta">0</strong></div>
                   <div class="meta-pill"><span>To Check</span><strong id="reviewCountMeta">0</strong></div>
                   <div class="meta-pill"><span>Saved</span><strong id="collectionCountMeta">0</strong></div>
                 </div>
@@ -226,7 +241,7 @@
             </button>
             <button type="button" class="bottom-nav__item" data-screen="catalog">
               <span class="bottom-nav__icon bottom-nav__icon--catalog" aria-hidden="true"></span>
-              <span>My List</span>
+              <span>Tools</span>
             </button>
           </nav>
         </div>

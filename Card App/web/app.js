@@ -1,8 +1,6 @@
 import {
   buildSearchQuery,
-  matchCatalogCards,
   parseCatalogCsv,
-  searchCatalog,
   summarizeCatalog,
 } from "./catalog.js";
 import {
@@ -11,7 +9,12 @@ import {
   generateDemoCardAsset,
   generateDemoImage,
 } from "./demo-data.js";
-import { buildSoldSearchUrl, fetchPriceEstimate } from "./pricing.js";
+import {
+  buildEbaySearchText,
+  fetchEbayMatches,
+  buildSoldSearchUrl,
+  fetchPriceEstimate,
+} from "./pricing.js";
 import {
   detectCropsFromImage,
   getEngineStatusText,
@@ -133,7 +136,7 @@ function bindEvents() {
   refs.resetCatalogButton.addEventListener("click", () => {
     resetCatalog(state);
     state.appSettings.lastCatalogErrors = [];
-    setStatus("Your list is cleared.");
+    setStatus("Your personal sheet is cleared.");
     render();
   });
 
@@ -228,12 +231,12 @@ async function handleCatalogImport(event) {
     setStatus(
       parsed.errors.length
         ? `Added ${parsed.cards.length} cards. ${parsed.errors.length} line${parsed.errors.length === 1 ? "" : "s"} still need a quick fix.`
-        : `Added ${parsed.cards.length} cards to your list.`,
+        : `Added ${parsed.cards.length} cards to your personal sheet.`,
     );
     showScreen("catalog");
     render();
   } catch (error) {
-    setStatus(`That list would not open. ${error.message}`);
+    setStatus(`That sheet would not open. ${error.message}`);
   }
 }
 
@@ -430,10 +433,19 @@ async function seedDemoResults() {
           displayLabel: `${card.playerName} - ${card.year} ${card.brand} ${card.setName} #${card.cardNumber}`,
           rank: 1,
           uncertainty: !confirmed,
+          title: `${card.playerName} - ${card.year} ${card.brand} ${card.setName} #${card.cardNumber}`,
+          priceText: estimate ? formatCurrency(estimate) : "",
+          priceValue: estimate,
+          searchQuery: buildSearchQuery(card),
+          lowSold: estimate ? Math.max(1, estimate * 0.78) : null,
+          highSold: estimate ? estimate * 1.18 : null,
+          typicalSold: estimate,
+          soldSearchUrl: buildSoldSearchUrl(card),
         },
       ],
       selectedCatalogCardId: card.catalogCardId,
-      manualSearch: "",
+      manualSearch: buildSearchQuery(card),
+      searchQuery: buildSearchQuery(card),
       reviewStatus: confirmed ? "confirmed" : "pending",
       unknownFlag: false,
       pricing: confirmed
@@ -512,7 +524,11 @@ async function handleScan() {
         confidence: null,
         error: error.message,
       }));
-      const candidates = matchCatalogCards(state.catalogCards, ocrResult.text, 5);
+      const searchQuery = buildEbaySearchText(ocrResult.text);
+      const candidates = await fetchCandidatesForCrop({
+        searchQuery,
+        imageDataUrl: detectedCrop.imageDataUrl,
+      });
 
       session.crops.push({
         cropId: detectedCrop.cropId,
@@ -525,7 +541,8 @@ async function handleScan() {
         ocrError: ocrResult.error || "",
         matchCandidates: candidates,
         selectedCatalogCardId: candidates[0]?.catalogCardId || "",
-        manualSearch: "",
+        manualSearch: searchQuery,
+        searchQuery,
         reviewStatus: "pending",
         unknownFlag: false,
         pricing: null,
@@ -535,7 +552,11 @@ async function handleScan() {
       ui.selectedCropId = detectedCrop.cropId;
       saveState(state);
       render();
-      setStatus(`Checked card ${index + 1} of ${detectedCrops.length}.`);
+      setStatus(
+        candidates.length
+          ? `Checked card ${index + 1} of ${detectedCrops.length}. eBay found ${candidates.length} likely card${candidates.length === 1 ? "" : "s"}.`
+          : `Checked card ${index + 1} of ${detectedCrops.length}. We did not get a clean eBay match yet.`,
+      );
 
       if (index < detectedCrops.length - 1) {
         await pauseForUi();
@@ -547,7 +568,7 @@ async function handleScan() {
     ensureSelectedCrop();
     showScreen("review");
     saveState(state);
-    setStatus("Your cards are ready. Save the right one before checking value.");
+    setStatus("Your cards are ready. Pick the closest eBay card, then we will show the sold range.");
     render();
   } catch (error) {
     setStatus(`That photo did not work. ${error.message}`);
@@ -587,13 +608,6 @@ function handleReviewChange(event) {
     selected.crop.manualSearch = event.target.value;
     saveState(state);
     render();
-    return;
-  }
-
-  if (event.target.name === "manualChoice") {
-    selected.crop.selectedCatalogCardId = event.target.value;
-    saveState(state);
-    render();
   }
 }
 
@@ -620,6 +634,11 @@ async function handleReviewClick(event) {
     return;
   }
 
+  if (action === "search-ebay") {
+    await searchSelectedCropOnEbay(selected);
+    return;
+  }
+
   if (action === "unknown") {
     saveUnknownCrop(selected);
     return;
@@ -631,9 +650,9 @@ async function handleReviewClick(event) {
 }
 
 async function confirmSelectedCrop(selected) {
-  const card = findCatalogCard(selected.crop.selectedCatalogCardId);
-  if (!card) {
-    setStatus("Pick the right card from your list, or save this one for later.");
+  const candidate = findSelectedCandidate(selected.crop);
+  if (!candidate) {
+    setStatus("Pick the right eBay card first, or search again.");
     return;
   }
 
@@ -653,32 +672,44 @@ async function confirmSelectedCrop(selected) {
   selected.crop.unknownFlag = false;
   selected.crop.pricing = {
     status: "loading",
-    note: "Checking recent eBay sales...",
+    note: "Pulling recent eBay sales...",
   };
 
-  const collectionCard = upsertCollectionCard(selected.crop, card);
+  const collectionCard = upsertCollectionCard(selected.crop, candidate);
   selected.crop.collectionCardId = collectionCard.collectionCardId;
   saveState(state);
   render();
 
   try {
-    const pricing = await fetchPriceEstimate(card);
+    const pricing =
+      candidate.lowSold || candidate.highSold || candidate.typicalSold
+        ? buildPricingFromCandidate(candidate)
+        : await fetchPriceEstimate(
+            candidate.pricingQuery ||
+              candidate.title ||
+              candidate.searchQuery ||
+              selected.crop.manualSearch ||
+              selected.crop.searchQuery ||
+              "",
+          );
     selected.crop.pricing = pricing;
 
     if (pricing.mode === "automatic" && Number.isFinite(pricing.estimate)) {
       const snapshot = savePriceSnapshot(collectionCard.collectionCardId, pricing.estimate, pricing);
       collectionCard.latestPriceSnapshotId = snapshot.priceSnapshotId;
-      setStatus(`Saved ${card.playerName} with a quick value check.`);
+      setStatus(`Saved ${candidate.playerName || "that card"} with recent eBay sales.`);
     } else {
-      setStatus(`Saved ${card.playerName}. Add a sale price if you want one now.`);
+      setStatus(`Saved ${candidate.playerName || "that card"}. Add a sale price if you want one now.`);
     }
   } catch (error) {
     selected.crop.pricing = {
       status: "manual",
       note: error.message,
-      soldSearchUrl: buildSoldSearchUrl(card),
+      soldSearchUrl: buildSoldSearchUrl(
+        candidate.pricingQuery || candidate.title || candidate.searchQuery || selected.crop.manualSearch || selected.crop.searchQuery || "",
+      ),
     };
-    setStatus(`Saved ${card.playerName}. You can add a price yourself from eBay sales.`);
+    setStatus(`Saved ${candidate.playerName || "that card"}. You can add a price yourself from eBay sales.`);
   }
 
   saveState(state);
@@ -714,13 +745,19 @@ function saveManualPrice(selected) {
 
   const collectionCardId =
     selected.crop.collectionCardId ||
-    upsertCollectionCard(selected.crop, findCatalogCard(selected.crop.selectedCatalogCardId)).collectionCardId;
+    upsertCollectionCard(selected.crop, findSelectedCandidate(selected.crop)).collectionCardId;
   const card = state.collectionCards.find((entry) => entry.collectionCardId === collectionCardId);
   const snapshot = savePriceSnapshot(collectionCardId, value, {
     mode: "manual",
     note: "Price added by you.",
     soldSearchUrl:
-      selected.crop.pricing?.soldSearchUrl || buildSoldSearchUrl(findCatalogCard(selected.crop.selectedCatalogCardId)),
+      selected.crop.pricing?.soldSearchUrl ||
+      buildSoldSearchUrl(
+        findSelectedCandidate(selected.crop)?.pricingQuery ||
+          selected.crop.searchQuery ||
+          selected.crop.manualSearch ||
+          "",
+      ),
   });
 
   if (card) {
@@ -756,14 +793,14 @@ function upsertCollectionCard(crop, card) {
     };
 
   collectionCard.catalogCardId = card?.catalogCardId || "";
-  collectionCard.playerNameSnapshot = card?.playerName || "Unknown card";
-  collectionCard.setNameSnapshot = card?.setName || "";
+  collectionCard.playerNameSnapshot = card?.playerName || card?.title || "Unknown card";
+  collectionCard.setNameSnapshot = card?.setName || card?.subtitle || card?.condition || card?.priceText || "";
   collectionCard.cardNumberSnapshot = card?.cardNumber || "";
   collectionCard.sportSnapshot = card?.sport || "";
   collectionCard.teamNameSnapshot = card?.teamName || "";
   collectionCard.yearSnapshot = card?.year || "";
-  collectionCard.searchQuery = card ? buildSearchQuery(card) : "";
-  collectionCard.note = crop.note || "";
+  collectionCard.searchQuery = card?.pricingQuery || card?.searchQuery || crop.searchQuery || card?.title || "";
+  collectionCard.note = card?.itemWebUrl || card?.title || crop.note || "";
 
   if (!existing) {
     state.collectionCards.unshift(collectionCard);
@@ -915,7 +952,7 @@ function renderScanCropRail(crops) {
 }
 
 function renderCropCard(crop, session, showScanInfo) {
-  const matchedCard = findCatalogCard(crop.selectedCatalogCardId) || crop.matchCandidates[0] || null;
+  const matchedCard = findSelectedCandidate(crop) || crop.matchCandidates[0] || null;
   const collectionCard = crop.collectionCardId
     ? state.collectionCards.find((entry) => entry.collectionCardId === crop.collectionCardId)
     : null;
@@ -925,10 +962,10 @@ function renderCropCard(crop, session, showScanInfo) {
     <button type="button" class="recent-card" data-crop-id="${crop.cropId}">
       <img src="${crop.imageDataUrl}" alt="Card preview" loading="lazy" decoding="async" />
       <div class="recent-card__meta">
-        <span class="recent-card__title">${escapeHtml(matchedCard?.playerName || "Unknown card")}</span>
+        <span class="recent-card__title">${escapeHtml(candidatePrimaryText(matchedCard) || "Unknown card")}</span>
         <span class="recent-card__sub">${escapeHtml(
           matchedCard
-            ? `${matchedCard.setName || matchedCard.displayLabel || ""} ${matchedCard.cardNumber ? `#${matchedCard.cardNumber}` : ""}`.trim()
+            ? candidateDetailText(matchedCard)
             : crop.note || "Still needs a quick look",
         )}</span>
         <span class="recent-card__value">${escapeHtml(resolveCropValueText(crop, latestPrice))}</span>
@@ -956,7 +993,7 @@ function renderCollectionCards(cards) {
         <article class="collection-card">
           <img src="${card.imageDataUrl}" alt="Saved card" loading="lazy" decoding="async" />
           <div class="collection-card__meta">
-            <span class="collection-card__title">${escapeHtml(card.playerNameSnapshot || "Unknown card")}</span>
+            <span class="collection-card__title">${escapeHtml(shortenText(card.playerNameSnapshot || "Unknown card", 58))}</span>
             <span class="collection-card__sub">${escapeHtml(
               [card.yearSnapshot, card.setNameSnapshot, card.cardNumberSnapshot ? `#${card.cardNumberSnapshot}` : ""]
                 .filter(Boolean)
@@ -976,8 +1013,7 @@ function renderReviewPane(allCrops) {
     return renderEmptyCard("Pick a card", "Tap a card from Recent or Scan to see it here.");
   }
 
-  const manualResults = searchCatalog(state.catalogCards, selected.crop.manualSearch || "", 8);
-  const currentCard = findCatalogCard(selected.crop.selectedCatalogCardId);
+  const currentCard = findSelectedCandidate(selected.crop);
 
   return `
     <div class="review-queue">
@@ -1005,11 +1041,19 @@ function renderReviewPane(allCrops) {
         }
       </div>
       <div class="review-note">
-        <strong>What we could read</strong>
-        <div class="small-copy">${escapeHtml(selected.crop.ocrText || "We could not read much from this one yet.")}</div>
+        <strong>What the photo picked up</strong>
+        <div class="small-copy">${escapeHtml(describeReadText(selected.crop))}</div>
+      </div>
+      <label class="input-group">
+        <span>Search eBay</span>
+        <input type="search" name="manualSearch" value="${escapeAttribute(selected.crop.manualSearch || "")}" placeholder="Player, year, set, or card number" />
+      </label>
+      <div class="small-copy">Tip: leave this blank if you want us to lean on the card photo first.</div>
+      <div class="button-row">
+        <button class="button" type="button" data-action="search-ebay">Search eBay</button>
       </div>
       <div class="review-note">
-        <strong>Best picks</strong>
+        <strong>Closest eBay cards</strong>
         <div class="candidate-list">
           ${
             selected.crop.matchCandidates.length
@@ -1021,45 +1065,30 @@ function renderReviewPane(allCrops) {
                           <input type="radio" name="candidateChoice" value="${candidate.catalogCardId}" ${
                             selected.crop.selectedCatalogCardId === candidate.catalogCardId ? "checked" : ""
                           } />
-                          <strong>${escapeHtml(candidate.playerName)}</strong>
-                          <span class="small-copy">${escapeHtml(`${candidate.year} ${candidate.brand} ${candidate.setName} #${candidate.cardNumber}`)}</span>
-                          <span class="small-copy">This feels about ${Math.round(candidate.confidenceScore * 100)}% right.</span>
+                          <div class="candidate-card__row">
+                            ${
+                              candidate.imageUrl
+                                ? `<img class="candidate-card__thumb" src="${candidate.imageUrl}" alt="eBay card" loading="lazy" decoding="async" />`
+                                : ""
+                            }
+                            <div class="candidate-card__copy">
+                              <strong>${escapeHtml(candidatePrimaryText(candidate))}</strong>
+                              <span class="small-copy">${escapeHtml(candidateDetailText(candidate))}</span>
+                              <span class="small-copy">${escapeHtml(candidate.priceText || "Recent eBay sale")}</span>
+                              <span class="small-copy">This feels about ${Math.round(candidate.confidenceScore * 100)}% right.</span>
+                            </div>
+                          </div>
                         </label>
                       </div>
                     `,
                   )
                   .join("")
-              : '<div class="small-copy">We could not make a strong guess yet. Search your list or save this card for later.</div>'
+              : '<div class="small-copy">Nothing close popped up yet. Try the player name, year, set, or card number above.</div>'
           }
         </div>
       </div>
-      <label class="input-group">
-        <span>Search your list</span>
-        <input type="search" name="manualSearch" value="${escapeAttribute(selected.crop.manualSearch || "")}" placeholder="Player, year, set, or card number" />
-      </label>
-      <div class="manual-list">
-        ${
-          manualResults.length
-            ? manualResults
-                .map(
-                  (card) => `
-                    <div class="manual-card ${selected.crop.selectedCatalogCardId === card.catalogCardId ? "manual-card--active" : ""}">
-                      <label>
-                        <input type="radio" name="manualChoice" value="${card.catalogCardId}" ${
-                          selected.crop.selectedCatalogCardId === card.catalogCardId ? "checked" : ""
-                        } />
-                        <strong>${escapeHtml(card.playerName)}</strong>
-                        <span class="small-copy">${escapeHtml(`${card.year} ${card.brand} ${card.setName} #${card.cardNumber}`)}</span>
-                      </label>
-                    </div>
-                  `,
-                )
-                .join("")
-            : '<div class="small-copy">Nothing in your list matches that search yet.</div>'
-        }
-      </div>
       <div class="button-row">
-        <button class="button button--primary" type="button" data-action="confirm">Yep, Save This Card</button>
+        <button class="button button--primary" type="button" data-action="confirm">Save This Card</button>
         <button class="button button--ghost" type="button" data-action="unknown">Save for Later</button>
       </div>
       ${renderPricingBox(selected.crop, currentCard)}
@@ -1069,11 +1098,13 @@ function renderReviewPane(allCrops) {
 
 function renderPricingBox(crop, currentCard) {
   if (!crop.collectionCardId && !crop.pricing) {
-    return '<div class="pricing-card"><strong>Value Check</strong><div class="small-copy">We only check value after you save the right card.</div></div>';
+    return '<div class="pricing-card"><strong>Sold Range</strong><div class="small-copy">Pick the right eBay card first, then we will show the low, most common, and high sales.</div></div>';
   }
 
   const pricing = crop.pricing || {};
-  const soldSearchUrl = pricing.soldSearchUrl || buildSoldSearchUrl(currentCard);
+  const soldSearchUrl =
+    pricing.soldSearchUrl ||
+    buildSoldSearchUrl(currentCard?.pricingQuery || currentCard?.title || currentCard?.searchQuery || crop.searchQuery || "");
   const comparableMarkup = Array.isArray(pricing.comparableListings) && pricing.comparableListings.length
     ? `
         <div class="candidate-list">
@@ -1082,8 +1113,14 @@ function renderPricingBox(crop, currentCard) {
             .map(
               (listing) => `
                 <div class="candidate-card">
+                  ${
+                    listing.imageUrl
+                      ? `<div class="candidate-card__row"><img class="candidate-card__thumb" src="${listing.imageUrl}" alt="eBay sale" loading="lazy" decoding="async" /><div class="candidate-card__copy">`
+                      : ""
+                  }
                   <strong>${escapeHtml(listing.priceText || formatCurrency(listing.priceValue || 0))}</strong>
                   <div class="small-copy">${escapeHtml(listing.title || "Recent sold listing")}</div>
+                  ${listing.imageUrl ? "</div></div>" : ""}
                 </div>
               `,
             )
@@ -1094,9 +1131,30 @@ function renderPricingBox(crop, currentCard) {
 
   return `
     <div class="pricing-card">
-      <strong>Value Check</strong>
+      <strong>Sold Range</strong>
       <div class="small-copy">${escapeHtml(pricing.note || "No value saved yet.")}</div>
-      ${Number.isFinite(pricing.estimate) ? `<div class="collection-card__value">${formatCurrency(pricing.estimate)}</div>` : ""}
+      ${
+        Number.isFinite(pricing.lowSold) || Number.isFinite(pricing.typicalSold) || Number.isFinite(pricing.highSold)
+          ? `
+            <div class="pricing-stats">
+              <div class="pricing-stat">
+                <span>Low Sold</span>
+                <strong>${formatOptionalCurrency(pricing.lowSold)}</strong>
+              </div>
+              <div class="pricing-stat pricing-stat--feature">
+                <span>Most Common Sold</span>
+                <strong>${formatOptionalCurrency(pricing.typicalSold || pricing.estimate)}</strong>
+              </div>
+              <div class="pricing-stat">
+                <span>High Sold</span>
+                <strong>${formatOptionalCurrency(pricing.highSold)}</strong>
+              </div>
+            </div>
+          `
+          : Number.isFinite(pricing.estimate)
+            ? `<div class="collection-card__value">${formatCurrency(pricing.estimate)}</div>`
+            : ""
+      }
       ${comparableMarkup}
       <div class="button-row">
         <a class="button button--ghost" href="${soldSearchUrl}" target="_blank" rel="noreferrer">See eBay Sales</a>
@@ -1112,7 +1170,7 @@ function renderPricingBox(crop, currentCard) {
 
 function renderCatalogRows() {
   if (!state.catalogCards.length) {
-    return '<tr><td colspan="4" class="small-copy">Your list is empty.</td></tr>';
+    return '<tr><td colspan="4" class="small-copy">No personal sheet loaded.</td></tr>';
   }
 
   return state.catalogCards
@@ -1270,11 +1328,116 @@ function resolveCropValueText(crop, latestPrice) {
     return "Save for later";
   }
 
-  return "Needs your okay";
+  return "Take a look";
 }
 
-function findCatalogCard(catalogCardId) {
-  return state.catalogCards.find((card) => card.catalogCardId === catalogCardId) || null;
+function candidatePrimaryText(candidate) {
+  if (!candidate) {
+    return "";
+  }
+
+  return shortenText(candidate.title || candidate.playerName || candidate.displayLabel || "eBay card", 70);
+}
+
+function candidateSecondaryText(candidate) {
+  if (!candidate) {
+    return "";
+  }
+
+  const detailText = [
+    candidate.year,
+    candidate.cardNumber ? `#${candidate.cardNumber}` : "",
+    candidate.condition || candidate.subtitle || "",
+  ]
+    .filter(Boolean)
+    .join(" • ");
+  return shortenText(detailText || candidate.priceText || "eBay card", 86);
+}
+
+function candidateDetailText(candidate) {
+  if (!candidate) {
+    return "";
+  }
+
+  const detailText = [
+    candidate.year,
+    candidate.cardNumber ? `#${candidate.cardNumber}` : "",
+    candidate.condition || candidate.subtitle || "",
+  ]
+    .filter(Boolean)
+    .join(" - ");
+  return shortenText(detailText || candidate.priceText || "eBay card", 86);
+}
+
+function findSelectedCandidate(crop) {
+  if (!crop) {
+    return null;
+  }
+
+  return crop.matchCandidates.find((candidate) => candidate.catalogCardId === crop.selectedCatalogCardId) || null;
+}
+
+async function fetchCandidatesForCrop({ searchQuery, imageDataUrl } = {}) {
+  if (!searchQuery && !imageDataUrl) {
+    return [];
+  }
+
+  const matchData = await fetchEbayMatches({
+    searchQuery,
+    imageDataUrl,
+    limit: 6,
+  });
+
+  return matchData.candidates || [];
+}
+
+async function searchSelectedCropOnEbay(selected) {
+  const query = String(selected.crop.manualSearch || selected.crop.searchQuery || buildEbaySearchText(selected.crop.ocrText)).trim();
+  if (!query && !selected.crop.imageDataUrl) {
+    setStatus("Give eBay a few words first, like player, year, set, or card number.");
+    return;
+  }
+
+  selected.crop.manualSearch = query;
+  selected.crop.searchQuery = query;
+  setStatus(query ? `Searching eBay for "${query}"...` : "Searching eBay from the card photo...");
+  render();
+
+  try {
+    const candidates = await fetchCandidatesForCrop({
+      searchQuery: query,
+      imageDataUrl: selected.crop.imageDataUrl,
+    });
+    selected.crop.matchCandidates = candidates;
+    selected.crop.selectedCatalogCardId = candidates[0]?.catalogCardId || "";
+    saveState(state);
+    setStatus(
+      candidates.length
+        ? `eBay found ${candidates.length} likely card${candidates.length === 1 ? "" : "s"}${query ? ` for "${query}"` : ""}.`
+        : query
+          ? `Nothing close showed up on eBay for "${query}" yet.`
+          : "Nothing close showed up on eBay from the photo yet.",
+    );
+    render();
+  } catch (error) {
+    setStatus(`eBay search hit a snag. ${error.message}`);
+    render();
+  }
+}
+
+function buildPricingFromCandidate(candidate) {
+  return {
+    mode: "automatic",
+    estimate: candidate.typicalSold,
+    typicalSold: candidate.typicalSold,
+    lowSold: candidate.lowSold,
+    highSold: candidate.highSold,
+    soldSearchUrl: candidate.soldSearchUrl || buildSoldSearchUrl(candidate.pricingQuery || candidate.title || candidate.searchQuery || ""),
+    note: candidate.sampleSize
+      ? `Based on ${candidate.sampleSize} recent eBay sale${candidate.sampleSize === 1 ? "" : "s"}.`
+      : "Based on recent eBay sales.",
+    comparableListings: candidate.comparableListings || [],
+  };
 }
 
 function setStatus(message) {
@@ -1320,6 +1483,14 @@ function formatCurrency(value) {
   return moneyFormatter.format(value);
 }
 
+function formatOptionalCurrency(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "-";
+  }
+
+  return moneyFormatter.format(value);
+}
+
 function humanReviewStatus(status) {
   switch (status) {
     case "confirmed":
@@ -1327,8 +1498,49 @@ function humanReviewStatus(status) {
     case "unknown":
       return "Save for later";
     default:
-      return "Needs your okay";
+      return "Take a look";
   }
+}
+
+function describeReadText(crop) {
+  if (crop.ocrError) {
+    return "We had a hard time reading this one. That is okay. Pick the right card below.";
+  }
+
+  const cleaned = String(crop.ocrText || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return "We could not read much from this one. Use the card choices below.";
+  }
+
+  const looksMessy = looksLikeMessyRead(cleaned, crop.ocrConfidence);
+  if (looksMessy) {
+    return "This one came through rough. That is normal on shiny cards. Use the eBay picks below or tighten the search.";
+  }
+
+  return shortenText(cleaned, 140);
+}
+
+function looksLikeMessyRead(text, confidence) {
+  if (Number.isFinite(confidence) && confidence < 0.55) {
+    return true;
+  }
+
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!words.length) {
+    return true;
+  }
+
+  const shortWordCount = words.filter((word) => word.length <= 2).length;
+  const weirdCharCount = (text.match(/[^a-z0-9\s#&.,:'"()-]/gi) || []).length;
+  return shortWordCount / words.length > 0.45 || weirdCharCount > Math.max(4, text.length * 0.08);
+}
+
+function shortenText(text, maxLength) {
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, maxLength - 1).trim()}...`;
 }
 
 function humanReviewBadgeClass(status) {
