@@ -1,0 +1,18 @@
+{
+  "name": "Sports Card Scanner MVP",
+  "short_name": "Card Scanner",
+  "description": "Snap sports cards, pick the right match, and keep an easy collection with price checks.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#091126",
+  "theme_color": "#162448",
+  "icons": [
+    {
+      "src": "./assets/logo-badge.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
