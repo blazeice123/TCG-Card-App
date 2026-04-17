@@ -52,7 +52,10 @@ exports.handler = async function handler(event) {
     return jsonResponse(200, {
       ok: true,
       mode: "automatic",
-      estimate: computeMedian(comparableListings.map((listing) => listing.priceValue)),
+      estimate: computeTypical(comparableListings.map((listing) => listing.priceValue)),
+      lowSold: Math.min(...comparableListings.map((listing) => listing.priceValue)),
+      highSold: Math.max(...comparableListings.map((listing) => listing.priceValue)),
+      typicalSold: computeTypical(comparableListings.map((listing) => listing.priceValue)),
       currency: comparableListings[0].currency || "USD",
       sampleSize: comparableListings.length,
       query,
@@ -93,6 +96,10 @@ function parseComparableListings(html, query) {
       const title = decodeHtml(matchFirst(block, /s-item__title[^>]*>([\s\S]*?)<\/[^>]+>/i));
       const href = decodeHtml(matchFirst(block, /<a[^>]*class="[^"]*s-item__link[^"]*"[^>]*href="([^"]+)"/i));
       const priceText = decodeHtml(matchFirst(block, /s-item__price[^>]*>([\s\S]*?)<\/span>/i));
+      const imageUrl = decodeHtml(
+        matchFirst(block, /<img[^>]+(?:data-src|src)="([^"]+)"[^>]*class="[^"]*s-item__image-img[^"]*"/i) ||
+          matchFirst(block, /<img[^>]+class="[^"]*s-item__image-img[^"]*"[^>]+(?:data-src|src)="([^"]+)"/i),
+      );
       const price = parsePrice(priceText);
 
       if (!title || !href || !price) {
@@ -107,6 +114,7 @@ function parseComparableListings(html, query) {
       return {
         title,
         url: href,
+        imageUrl,
         priceText,
         priceValue: price.value,
         currency: price.currency,
@@ -138,7 +146,48 @@ function parsePrice(priceText) {
   };
 }
 
-function computeMedian(values) {
+function computeTypical(values) {
+  const sorted = [...values].sort((left, right) => left - right);
+  if (!sorted.length) {
+    return 0;
+  }
+
+  const bucketSize = typicalBucketSize(sorted);
+  const bucketCounts = new Map();
+
+  sorted.forEach((value) => {
+    const bucket = Math.round(value / bucketSize) * bucketSize;
+    const existing = bucketCounts.get(bucket) || [];
+    existing.push(value);
+    bucketCounts.set(bucket, existing);
+  });
+
+  const mostCommonBucket = [...bucketCounts.entries()].sort((left, right) => {
+    const countDiff = right[1].length - left[1].length;
+    if (countDiff !== 0) {
+      return countDiff;
+    }
+
+    return Math.abs(median(sorted) - left[0]) - Math.abs(median(sorted) - right[0]);
+  })[0]?.[1];
+
+  return Number((median(mostCommonBucket || sorted)).toFixed(2));
+}
+
+function typicalBucketSize(values) {
+  const maxValue = Math.max(...values);
+  if (maxValue < 25) {
+    return 1;
+  }
+
+  if (maxValue < 100) {
+    return 2.5;
+  }
+
+  return 5;
+}
+
+function median(values) {
   const sorted = [...values].sort((left, right) => left - right);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
