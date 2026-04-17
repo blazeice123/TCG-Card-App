@@ -6,7 +6,7 @@
     <title>Card Scanner</title>
     <meta
       name="description"
-      content="Snap sports cards, save the right matches, and keep an easy collection with quick price checks."
+      content="Snap sports cards, save the right card, and keep a clean collection with quick value checks."
     />
     <meta name="theme-color" content="#162448" />
     <link rel="icon" href="./assets/logo-badge.svg" type="image/svg+xml" />
@@ -18,8 +18,6 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="./styles.css" />
-    <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-    <script defer src="https://docs.opencv.org/4.x/opencv.js"></script>
     <script type="module" src="./app.js"></script>
   </head>
   <body>
@@ -39,7 +37,7 @@
                 <h1>Card Scanner</h1>
               </div>
             </div>
-            <button id="queuePill" class="queue-pill" type="button" data-screen-jump="review">0 left</button>
+            <button id="queuePill" class="queue-pill" type="button" data-screen-jump="review">0 waiting</button>
           </header>
 
           <section class="action-strip">
@@ -54,7 +52,7 @@
           </section>
 
           <div id="statusBanner" class="status-banner">
-            Start with a full page photo. If the page is messy, switch to one-card mode and keep moving.
+            Start with one full photo. If that gets messy, snap one card at a time.
           </div>
 
           <main class="screen-stack">
@@ -79,7 +77,7 @@
                 <div class="section-heading">
                   <div>
                     <h2>Recently Scanned</h2>
-                    <p id="recentSummary" class="section-copy">Your newest cards and saves show up here.</p>
+                    <p id="recentSummary" class="section-copy">Your newest cards show up here.</p>
                   </div>
                   <button class="section-link" type="button" data-screen-jump="review">See All</button>
                 </div>
@@ -90,9 +88,9 @@
                 <div class="section-heading">
                   <div>
                     <h2>My Collection</h2>
-                    <p id="collectionSummary" class="section-copy">Cards you keep live here on this device.</p>
+                    <p id="collectionSummary" class="section-copy">Cards you save show up here.</p>
                   </div>
-                  <button class="section-link" type="button" data-screen-jump="catalog">Card List</button>
+                  <button class="section-link" type="button" data-screen-jump="catalog">My List</button>
                 </div>
                 <div id="collectionFilters" class="filter-row">
                   <button type="button" class="filter-chip filter-chip--active" data-filter="all">All</button>
@@ -109,30 +107,30 @@
                 <div class="section-heading">
                   <div>
                     <h2>Scan Cards</h2>
-                    <p id="engineStatus" class="section-copy">Getting the scanner ready...</p>
+                    <p id="engineStatus" class="section-copy">Getting things ready...</p>
                   </div>
                 </div>
                 <div id="scanModeRow" class="filter-row">
-                  <button type="button" class="filter-chip filter-chip--active" data-scan-mode="page">Whole Page</button>
-                  <button type="button" class="filter-chip" data-scan-mode="single">One Card</button>
+                  <button type="button" class="filter-chip filter-chip--active" data-scan-mode="page">Full Photo</button>
+                  <button type="button" class="filter-chip" data-scan-mode="single">Single Card</button>
                 </div>
                 <div class="button-row">
-                  <button id="pickImageButton" class="button" type="button">Pick Photo</button>
-                  <button id="demoScanButton" class="button button--ghost" type="button">Try Demo</button>
-                  <button id="scanButton" class="button button--primary" type="button">Find Cards</button>
-                  <button id="clearSessionButton" class="button button--ghost" type="button">Start Over</button>
+                  <button id="pickImageButton" class="button" type="button">Choose Photo</button>
+                  <button id="demoScanButton" class="button button--ghost" type="button">Try Sample</button>
+                  <button id="scanButton" class="button button--primary" type="button">Find My Cards</button>
+                  <button id="clearSessionButton" class="button button--ghost" type="button">Clear Photo</button>
                 </div>
                 <div class="scan-preview">
                   <img id="sourcePreview" alt="" hidden />
                   <div id="emptyPreview" class="empty-state">
                     <strong>No photo yet.</strong>
-                    <span>Pick a page scan or a single card photo to get rolling.</span>
+                    <span>Pick one full photo or one single card to get started.</span>
                   </div>
                 </div>
                 <div class="support-card">
-                  <strong>Quickest way to try it</strong>
+                  <strong>Fastest way to try it</strong>
                   <div class="small-copy">
-                    Load the demo card list, tap Try Demo, then hit Find Cards. You can test the full flow without
+                    Load the sample cards, tap Try Sample, then hit Find My Cards. You can try everything without
                     digging out real cards first.
                   </div>
                 </div>
@@ -142,7 +140,7 @@
                 <div class="section-heading">
                   <div>
                     <h2>Cards We Found</h2>
-                    <p id="cropSummary" class="section-copy">Nothing scanned yet</p>
+                    <p id="cropSummary" class="section-copy">Nothing yet</p>
                   </div>
                 </div>
                 <div id="cropGrid" class="recent-rail recent-rail--crops"></div>
@@ -153,8 +151,8 @@
               <section class="content-block">
                 <div class="section-heading">
                   <div>
-                    <h2>Check These Cards</h2>
-                    <p id="reviewSummary" class="section-copy">We make a best guess. You make the final call.</p>
+                    <h2>Pick the Right Card</h2>
+                    <p id="reviewSummary" class="section-copy">We suggest. You decide.</p>
                   </div>
                 </div>
                 <div id="reviewPane" class="review-pane"></div>
@@ -165,20 +163,20 @@
               <section class="content-block">
                 <div class="section-heading">
                   <div>
-                    <h2>Card List + Tools</h2>
-                    <p class="section-copy">Keep this list small and real so the app stays smart and fast.</p>
+                    <h2>My List</h2>
+                    <p class="section-copy">Keep this short and real so the app guesses better.</p>
                   </div>
-                  <a class="section-link" href="./catalog-template.csv" download>CSV Template</a>
+                  <a class="section-link" href="./catalog-template.csv" download>Blank Sheet</a>
                 </div>
                 <div class="button-row">
-                  <button id="catalogImportButton" class="button button--primary" type="button">Import Card List</button>
-                  <button id="demoCatalogButton" class="button button--ghost" type="button">Load Demo Cards</button>
-                  <button id="loadTemplateButton" class="button button--ghost" type="button">Open Template</button>
-                  <button id="resetCatalogButton" class="button button--ghost" type="button">Clear List</button>
+                  <button id="catalogImportButton" class="button button--primary" type="button">Add My List</button>
+                  <button id="demoCatalogButton" class="button button--ghost" type="button">Load Sample Cards</button>
+                  <button id="loadTemplateButton" class="button button--ghost" type="button">Open Blank Sheet</button>
+                  <button id="resetCatalogButton" class="button button--ghost" type="button">Clear My List</button>
                 </div>
                 <div id="catalogSummary" class="support-card"></div>
                 <div class="meta-strip">
-                  <div class="meta-pill"><span>Card List</span><strong id="catalogCountMeta">0</strong></div>
+                  <div class="meta-pill"><span>My List</span><strong id="catalogCountMeta">0</strong></div>
                   <div class="meta-pill"><span>To Check</span><strong id="reviewCountMeta">0</strong></div>
                   <div class="meta-pill"><span>Saved</span><strong id="collectionCountMeta">0</strong></div>
                 </div>
@@ -200,13 +198,13 @@
               <section class="content-block">
                 <div class="section-heading">
                   <div>
-                    <h2>Collection Tools</h2>
-                    <p class="section-copy">Download your saved cards or clear the demo and start fresh.</p>
+                    <h2>Collection Extras</h2>
+                    <p class="section-copy">Save a copy of your collection or wipe the sample cards and start fresh.</p>
                   </div>
                 </div>
                 <div class="button-row">
-                  <button id="demoResultsButton" class="button button--primary" type="button">Fill Demo Collection</button>
-                  <button id="exportCollectionButton" class="button button--ghost" type="button">Download Backup</button>
+                  <button id="demoResultsButton" class="button button--primary" type="button">Load Sample Collection</button>
+                  <button id="exportCollectionButton" class="button button--ghost" type="button">Save a Copy</button>
                   <button id="resetCollectionButton" class="button button--ghost" type="button">Clear Collection</button>
                 </div>
               </section>

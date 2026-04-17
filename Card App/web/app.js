@@ -43,7 +43,7 @@ const ui = {
   selectedCropId: null,
   pendingSourcePreview: null,
   statusMessage:
-    "Start with a full page photo. If that gets weird, switch to one-card mode and keep going.",
+    "Start with one full photo. If that gets messy, snap one card at a time.",
 };
 
 const refs = {
@@ -111,7 +111,7 @@ function bindEvents() {
   refs.manualActionButton.addEventListener("click", () => {
     state.appSettings.lastScanMode = "single";
     saveState(state);
-    setStatus("One-card mode is on. Pick a single front photo and we will take it from there.");
+    setStatus("Single-card is on. Pick one clear front photo and we will handle the rest.");
     showScreen("scan");
     triggerImagePicker();
   });
@@ -133,7 +133,7 @@ function bindEvents() {
   refs.resetCatalogButton.addEventListener("click", () => {
     resetCatalog(state);
     state.appSettings.lastCatalogErrors = [];
-    setStatus("Your card list is cleared.");
+    setStatus("Your list is cleared.");
     render();
   });
 
@@ -145,7 +145,7 @@ function bindEvents() {
     ui.selectedCropId = null;
     ui.pendingSourcePreview = null;
     refs.imageInput.value = "";
-    setStatus("That scan was cleared.");
+    setStatus("That photo is cleared.");
     render();
   });
 
@@ -181,7 +181,7 @@ function bindEvents() {
   refs.demoResultsButton.addEventListener("click", seedDemoResults);
   refs.resetCollectionButton.addEventListener("click", () => {
     resetCollection(state);
-    setStatus("Your saved cards were cleared.");
+    setStatus("Your saved cards are cleared.");
     render();
   });
 
@@ -227,13 +227,13 @@ async function handleCatalogImport(event) {
     saveState(state);
     setStatus(
       parsed.errors.length
-        ? `Loaded ${parsed.cards.length} cards. ${parsed.errors.length} row${parsed.errors.length === 1 ? "" : "s"} still need a quick fix.`
-        : `Loaded ${parsed.cards.length} cards into your card list.`,
+        ? `Added ${parsed.cards.length} cards. ${parsed.errors.length} line${parsed.errors.length === 1 ? "" : "s"} still need a quick fix.`
+        : `Added ${parsed.cards.length} cards to your list.`,
     );
     showScreen("catalog");
     render();
   } catch (error) {
-    setStatus(`Could not load that card list. ${error.message}`);
+    setStatus(`That list would not open. ${error.message}`);
   }
 }
 
@@ -244,10 +244,10 @@ function loadDemoCatalog() {
     state.appSettings.lastCatalogImportAt = new Date().toISOString();
     state.appSettings.lastCatalogErrors = parsed.errors;
     saveState(state);
-    setStatus(`Demo card list is ready with ${parsed.cards.length} cards.`);
+    setStatus(`Sample cards are ready with ${parsed.cards.length} cards.`);
     render();
   } catch (error) {
-    setStatus(`The demo card list would not load. ${error.message}`);
+    setStatus(`The sample cards would not load. ${error.message}`);
   }
 }
 
@@ -266,7 +266,7 @@ async function handleImageSelected(event) {
     : null;
 
   showScreen("scan");
-  setStatus(`Picked ${file.name}. Tap Find Cards when you are ready.`);
+  setStatus(`Picked ${file.name}. Tap Find My Cards when you are ready.`);
   render();
 }
 
@@ -276,7 +276,7 @@ async function handleGenerateDemoImage() {
     loadDemoCatalog();
   }
 
-  setStatus(mode === "single" ? "Building a demo card..." : "Building a demo page...");
+  setStatus(mode === "single" ? "Getting a sample card ready..." : "Getting a sample photo ready...");
   render();
   await pauseForUi();
   const demoImage = generateDemoImage(mode);
@@ -289,8 +289,8 @@ async function handleGenerateDemoImage() {
   showScreen("scan");
   setStatus(
     mode === "single"
-      ? "Demo single card is ready. Tap Find Cards to try the quick path."
-      : "Demo sheet is ready. Tap Find Cards and we will split it into cards.",
+      ? "Sample card is ready. Tap Find My Cards to give it a spin."
+      : "Sample photo is ready. Tap Find My Cards and we will split it up for you.",
   );
   render();
 }
@@ -358,7 +358,7 @@ async function seedDemoResults() {
   state.appSettings.lastCatalogErrors = [];
   state.appSettings.lastCollectionFilter = "all";
   ui.collectionFilter = "all";
-  setStatus("Loading demo cards...");
+  setStatus("Loading sample cards...");
   render();
 
   for (let index = 0; index < cards.length; index += 1) {
@@ -384,7 +384,7 @@ async function seedDemoResults() {
         source: "ebay",
         observedAt: new Date(Date.now() - index * 3600000).toISOString(),
         soldSearchUrl: buildSoldSearchUrl(card),
-        note: "Demo price check from recent eBay sales.",
+        note: "Sample value based on recent eBay sales.",
         comparableListings: [],
       });
 
@@ -402,7 +402,7 @@ async function seedDemoResults() {
         teamNameSnapshot: card.teamName,
         yearSnapshot: card.year,
         searchQuery: buildSearchQuery(card),
-        note: "Demo card loaded for a quick product tour.",
+        note: "Sample card added so you can click around.",
       });
     }
 
@@ -416,7 +416,7 @@ async function seedDemoResults() {
         right: 460,
         bottom: 644,
       },
-      note: confirmed ? "Demo card already saved." : "Demo card still needs a quick check.",
+      note: confirmed ? "Sample card already saved." : "Sample card still needs your okay.",
       ocrText: `${card.year} ${card.brand} ${card.setName} ${card.playerName} ${card.cardNumber} ${card.teamName}`,
       ocrConfidence: 0.93,
       ocrError: "",
@@ -441,7 +441,7 @@ async function seedDemoResults() {
             mode: "automatic",
             estimate,
             soldSearchUrl: buildSoldSearchUrl(card),
-            note: "Demo price check already saved.",
+            note: "Sample value already saved.",
             comparableListings: [],
           }
         : null,
@@ -454,7 +454,7 @@ async function seedDemoResults() {
   ui.pendingSourcePreview = null;
   ui.activeScreen = "collection";
   saveState(state);
-  setStatus("Demo cards are loaded across the app, so you can click around right away.");
+  setStatus("Sample cards are loaded, so you can tap around right away.");
   render();
 }
 
@@ -499,10 +499,10 @@ async function handleScan() {
     saveState(state);
     render();
 
-    setStatus(mode === "page" ? "Looking for cards on the page..." : "Using one-card mode...");
+    setStatus(mode === "page" ? "Looking for cards in your photo..." : "Using single-card view...");
     render();
     const detectedCrops = await detectCropsFromImage(loaded.dataUrl, mode);
-    setStatus(`Found ${detectedCrops.length} ${detectedCrops.length === 1 ? "card" : "cards"}. Reading the text now...`);
+    setStatus(`Found ${detectedCrops.length} ${detectedCrops.length === 1 ? "card" : "cards"}. Reading the details now...`);
     render();
 
     for (let index = 0; index < detectedCrops.length; index += 1) {
@@ -535,7 +535,7 @@ async function handleScan() {
       ui.selectedCropId = detectedCrop.cropId;
       saveState(state);
       render();
-      setStatus(`Read card ${index + 1} of ${detectedCrops.length}.`);
+      setStatus(`Checked card ${index + 1} of ${detectedCrops.length}.`);
 
       if (index < detectedCrops.length - 1) {
         await pauseForUi();
@@ -547,14 +547,14 @@ async function handleScan() {
     ensureSelectedCrop();
     showScreen("review");
     saveState(state);
-    setStatus("Your cards are ready. Save the right match before checking price.");
+    setStatus("Your cards are ready. Save the right one before checking value.");
     render();
   } catch (error) {
-    setStatus(`That scan did not work. ${error.message}`);
+    setStatus(`That photo did not work. ${error.message}`);
   } finally {
     ui.scanBusy = false;
     refs.scanButton.disabled = false;
-    refs.scanButton.textContent = "Find Cards";
+    refs.scanButton.textContent = "Find My Cards";
     render();
   }
 }
@@ -653,7 +653,7 @@ async function confirmSelectedCrop(selected) {
   selected.crop.unknownFlag = false;
   selected.crop.pricing = {
     status: "loading",
-    note: "Checking recent sold prices...",
+    note: "Checking recent eBay sales...",
   };
 
   const collectionCard = upsertCollectionCard(selected.crop, card);
@@ -668,9 +668,9 @@ async function confirmSelectedCrop(selected) {
     if (pricing.mode === "automatic" && Number.isFinite(pricing.estimate)) {
       const snapshot = savePriceSnapshot(collectionCard.collectionCardId, pricing.estimate, pricing);
       collectionCard.latestPriceSnapshotId = snapshot.priceSnapshotId;
-      setStatus(`Saved ${card.playerName} with a quick price check.`);
+      setStatus(`Saved ${card.playerName} with a quick value check.`);
     } else {
-      setStatus(`Saved ${card.playerName}. Add a sold price if you want one now.`);
+      setStatus(`Saved ${card.playerName}. Add a sale price if you want one now.`);
     }
   } catch (error) {
     selected.crop.pricing = {
@@ -678,7 +678,7 @@ async function confirmSelectedCrop(selected) {
       note: error.message,
       soldSearchUrl: buildSoldSearchUrl(card),
     };
-    setStatus(`Saved ${card.playerName}. You can add a price by hand from eBay sold listings.`);
+    setStatus(`Saved ${card.playerName}. You can add a price yourself from eBay sales.`);
   }
 
   saveState(state);
@@ -700,7 +700,7 @@ function saveUnknownCrop(selected) {
   });
 
   saveState(state);
-  setStatus("Saved this card for later without forcing a bad match.");
+  setStatus("Saved this card for later without forcing a bad guess.");
   render();
 }
 
@@ -708,7 +708,7 @@ function saveManualPrice(selected) {
   const input = refs.reviewPane.querySelector('[name="manualPrice"]');
   const value = Number.parseFloat(input?.value || "");
   if (!Number.isFinite(value) || value <= 0) {
-    setStatus("Type in a sold price first.");
+    setStatus("Type in a sale price first.");
     return;
   }
 
@@ -718,7 +718,7 @@ function saveManualPrice(selected) {
   const card = state.collectionCards.find((entry) => entry.collectionCardId === collectionCardId);
   const snapshot = savePriceSnapshot(collectionCardId, value, {
     mode: "manual",
-    note: "Price added by hand.",
+    note: "Price added by you.",
     soldSearchUrl:
       selected.crop.pricing?.soldSearchUrl || buildSoldSearchUrl(findCatalogCard(selected.crop.selectedCatalogCardId)),
   });
@@ -728,13 +728,13 @@ function saveManualPrice(selected) {
   }
 
   if (selected.crop.pricing) {
-    selected.crop.pricing.note = "Price added by hand.";
+    selected.crop.pricing.note = "Price added by you.";
   } else {
     selected.crop.pricing = {
       mode: "manual",
       estimate: value,
       soldSearchUrl: snapshot.soldSearchUrl,
-      note: "Price added by hand.",
+      note: "Price added by you.",
     };
   }
 
@@ -756,7 +756,7 @@ function upsertCollectionCard(crop, card) {
     };
 
   collectionCard.catalogCardId = card?.catalogCardId || "";
-  collectionCard.playerNameSnapshot = card?.playerName || "Card not named yet";
+  collectionCard.playerNameSnapshot = card?.playerName || "Unknown card";
   collectionCard.setNameSnapshot = card?.setName || "";
   collectionCard.cardNumberSnapshot = card?.cardNumber || "";
   collectionCard.sportSnapshot = card?.sport || "";
@@ -823,21 +823,21 @@ function render() {
   refs.highestCardValue.textContent = highestCard
     ? formatCurrency(findLatestSnapshot(highestCard)?.amountUsd || 0)
     : "Save a card to see your top hit";
-  refs.queuePill.textContent = `${pendingCount} left`;
+  refs.queuePill.textContent = `${pendingCount} waiting`;
 
   refs.recentSummary.textContent = allCrops.length
-    ? `${Math.min(allCrops.length, 6)} newest cards and saves from your latest scan.`
-    : "Your newest cards and saves show up here.";
+    ? `${Math.min(allCrops.length, 6)} newest cards from your latest photo.`
+    : "Your newest cards show up here.";
   refs.collectionSummary.textContent = filteredCollection.length
     ? `${filteredCollection.length} ${filteredCollection.length === 1 ? "card" : "cards"} in this view.`
     : "Cards you save show up here.";
 
   refs.engineStatus.textContent = getEngineStatusText();
   refs.cropSummary.textContent = latestSession
-    ? `${latestSession.crops.length} ${latestSession.crops.length === 1 ? "card" : "cards"} found in your latest scan`
-    : "Nothing scanned yet";
+    ? `${latestSession.crops.length} ${latestSession.crops.length === 1 ? "card" : "cards"} found in your latest photo`
+    : "Nothing yet";
   refs.reviewSummary.textContent = pendingCount
-    ? `${pendingCount} ${pendingCount === 1 ? "card still needs" : "cards still need"} a quick yes or no.`
+    ? `${pendingCount} ${pendingCount === 1 ? "card still needs" : "cards still need"} your okay.`
     : "You are all caught up.";
 
   refs.catalogSummary.textContent = summarizeCatalog(state.catalogCards, state.appSettings.lastCatalogErrors || []);
@@ -906,7 +906,7 @@ function renderRecentRail(crops) {
 
 function renderScanCropRail(crops) {
   if (!crops.length) {
-    return renderEmptyCard("No cards found yet", "Run Find Cards and we will show each card here.");
+    return renderEmptyCard("No cards yet", "Tap Find My Cards and we will show each card here.");
   }
 
   return crops
@@ -925,7 +925,7 @@ function renderCropCard(crop, session, showScanInfo) {
     <button type="button" class="recent-card" data-crop-id="${crop.cropId}">
       <img src="${crop.imageDataUrl}" alt="Card preview" loading="lazy" decoding="async" />
       <div class="recent-card__meta">
-        <span class="recent-card__title">${escapeHtml(matchedCard?.playerName || "Card not named yet")}</span>
+        <span class="recent-card__title">${escapeHtml(matchedCard?.playerName || "Unknown card")}</span>
         <span class="recent-card__sub">${escapeHtml(
           matchedCard
             ? `${matchedCard.setName || matchedCard.displayLabel || ""} ${matchedCard.cardNumber ? `#${matchedCard.cardNumber}` : ""}`.trim()
@@ -935,7 +935,7 @@ function renderCropCard(crop, session, showScanInfo) {
         ${
           showScanInfo
             ? `<span class="micro-copy">${escapeHtml(
-                session?.mode === "single" ? "One-card mode" : humanReviewStatus(crop.reviewStatus),
+                session?.mode === "single" ? "Single-card view" : humanReviewStatus(crop.reviewStatus),
               )}</span>`
             : ""
         }
@@ -956,7 +956,7 @@ function renderCollectionCards(cards) {
         <article class="collection-card">
           <img src="${card.imageDataUrl}" alt="Saved card" loading="lazy" decoding="async" />
           <div class="collection-card__meta">
-            <span class="collection-card__title">${escapeHtml(card.playerNameSnapshot || "Card not named yet")}</span>
+            <span class="collection-card__title">${escapeHtml(card.playerNameSnapshot || "Unknown card")}</span>
             <span class="collection-card__sub">${escapeHtml(
               [card.yearSnapshot, card.setNameSnapshot, card.cardNumberSnapshot ? `#${card.cardNumberSnapshot}` : ""]
                 .filter(Boolean)
@@ -973,7 +973,7 @@ function renderCollectionCards(cards) {
 function renderReviewPane(allCrops) {
   const selected = getSelectedCrop();
   if (!selected) {
-    return renderEmptyCard("Pick a card to check", "Tap a card from Recent or Scan to look it over here.");
+    return renderEmptyCard("Pick a card", "Tap a card from Recent or Scan to see it here.");
   }
 
   const manualResults = searchCatalog(state.catalogCards, selected.crop.manualSearch || "", 8);
@@ -1000,16 +1000,16 @@ function renderReviewPane(allCrops) {
         <span class="badge badge--${humanReviewBadgeClass(selected.crop.reviewStatus)}">${escapeHtml(humanReviewStatus(selected.crop.reviewStatus))}</span>
         ${
           selected.crop.matchCandidates[0]
-            ? `<span class="badge badge--pending">${Math.round(selected.crop.matchCandidates[0].confidenceScore * 100)}% match</span>`
+            ? `<span class="badge badge--pending">${Math.round(selected.crop.matchCandidates[0].confidenceScore * 100)}% sure</span>`
             : ""
         }
       </div>
       <div class="review-note">
-        <strong>Words we spotted</strong>
+        <strong>What we could read</strong>
         <div class="small-copy">${escapeHtml(selected.crop.ocrText || "We could not read much from this one yet.")}</div>
       </div>
       <div class="review-note">
-        <strong>Best guesses</strong>
+        <strong>Best picks</strong>
         <div class="candidate-list">
           ${
             selected.crop.matchCandidates.length
@@ -1023,19 +1023,19 @@ function renderReviewPane(allCrops) {
                           } />
                           <strong>${escapeHtml(candidate.playerName)}</strong>
                           <span class="small-copy">${escapeHtml(`${candidate.year} ${candidate.brand} ${candidate.setName} #${candidate.cardNumber}`)}</span>
-                          <span class="small-copy">Looks like a ${Math.round(candidate.confidenceScore * 100)}% match.</span>
+                          <span class="small-copy">This feels about ${Math.round(candidate.confidenceScore * 100)}% right.</span>
                         </label>
                       </div>
                     `,
                   )
                   .join("")
-              : '<div class="small-copy">We could not make a solid guess yet. Search your list or save this card for later.</div>'
+              : '<div class="small-copy">We could not make a strong guess yet. Search your list or save this card for later.</div>'
           }
         </div>
       </div>
       <label class="input-group">
-        <span>Search your card list</span>
-        <input type="search" name="manualSearch" value="${escapeAttribute(selected.crop.manualSearch || "")}" placeholder="Try player, year, set, or card number" />
+        <span>Search your list</span>
+        <input type="search" name="manualSearch" value="${escapeAttribute(selected.crop.manualSearch || "")}" placeholder="Player, year, set, or card number" />
       </label>
       <div class="manual-list">
         ${
@@ -1069,7 +1069,7 @@ function renderReviewPane(allCrops) {
 
 function renderPricingBox(crop, currentCard) {
   if (!crop.collectionCardId && !crop.pricing) {
-    return '<div class="pricing-card"><strong>Price Check</strong><div class="small-copy">We only check value after you save the right card.</div></div>';
+    return '<div class="pricing-card"><strong>Value Check</strong><div class="small-copy">We only check value after you save the right card.</div></div>';
   }
 
   const pricing = crop.pricing || {};
@@ -1094,15 +1094,15 @@ function renderPricingBox(crop, currentCard) {
 
   return `
     <div class="pricing-card">
-      <strong>Price Check</strong>
-      <div class="small-copy">${escapeHtml(pricing.note || "No price saved yet.")}</div>
+      <strong>Value Check</strong>
+      <div class="small-copy">${escapeHtml(pricing.note || "No value saved yet.")}</div>
       ${Number.isFinite(pricing.estimate) ? `<div class="collection-card__value">${formatCurrency(pricing.estimate)}</div>` : ""}
       ${comparableMarkup}
       <div class="button-row">
-        <a class="button button--ghost" href="${soldSearchUrl}" target="_blank" rel="noreferrer">See eBay Sold Listings</a>
+        <a class="button button--ghost" href="${soldSearchUrl}" target="_blank" rel="noreferrer">See eBay Sales</a>
       </div>
       <label class="input-group">
-        <span>Type a sold price</span>
+        <span>Type a sale price</span>
         <input type="number" name="manualPrice" min="0" step="0.01" placeholder="12.50" />
       </label>
       <button class="button button--ghost" type="button" data-action="manual-price">Save This Price</button>
@@ -1112,7 +1112,7 @@ function renderPricingBox(crop, currentCard) {
 
 function renderCatalogRows() {
   if (!state.catalogCards.length) {
-    return '<tr><td colspan="4" class="small-copy">Your card list is empty.</td></tr>';
+    return '<tr><td colspan="4" class="small-copy">Your list is empty.</td></tr>';
   }
 
   return state.catalogCards
@@ -1270,7 +1270,7 @@ function resolveCropValueText(crop, latestPrice) {
     return "Save for later";
   }
 
-  return "Needs a look";
+  return "Needs your okay";
 }
 
 function findCatalogCard(catalogCardId) {
@@ -1327,7 +1327,7 @@ function humanReviewStatus(status) {
     case "unknown":
       return "Save for later";
     default:
-      return "Needs a look";
+      return "Needs your okay";
   }
 }
 

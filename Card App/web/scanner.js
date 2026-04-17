@@ -2,16 +2,31 @@ const OCR_LANGUAGE = "eng";
 const MAX_DIMENSION = 1600;
 const TARGET_CARD_WIDTH = 500;
 const TARGET_CARD_HEIGHT = 700;
+const OPENCV_SCRIPT_URL = "https://docs.opencv.org/4.x/opencv.js";
+const TESSERACT_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
 
 let openCvState = {
   ready: false,
+  loading: false,
   error: null,
 };
+
+let tesseractState = {
+  ready: false,
+  loading: false,
+  error: null,
+};
+
+const scriptLoadPromises = new Map();
 
 export async function waitForOpenCv(timeoutMs = 18000) {
   if (openCvState.ready && window.cv) {
     return window.cv;
   }
+
+  openCvState.loading = true;
+  openCvState.error = null;
+  await loadScriptOnce(OPENCV_SCRIPT_URL);
 
   const startedAt = Date.now();
 
@@ -21,6 +36,7 @@ export async function waitForOpenCv(timeoutMs = 18000) {
       if (hasCvApi) {
         openCvState = {
           ready: true,
+          loading: false,
           error: null,
         };
         window.clearInterval(timer);
@@ -31,7 +47,8 @@ export async function waitForOpenCv(timeoutMs = 18000) {
       if (Date.now() - startedAt > timeoutMs) {
         openCvState = {
           ready: false,
-          error: "The card finder took too long to load.",
+          loading: false,
+          error: "We had trouble getting the photo helper ready.",
         };
         window.clearInterval(timer);
         reject(new Error(openCvState.error));
@@ -42,36 +59,59 @@ export async function waitForOpenCv(timeoutMs = 18000) {
 
 export async function waitForTesseract(timeoutMs = 18000) {
   if (window.Tesseract && typeof window.Tesseract.recognize === "function") {
+    tesseractState = {
+      ready: true,
+      loading: false,
+      error: null,
+    };
     return window.Tesseract;
   }
+
+  tesseractState.loading = true;
+  tesseractState.error = null;
+  await loadScriptOnce(TESSERACT_SCRIPT_URL);
 
   const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     const timer = window.setInterval(() => {
       if (window.Tesseract && typeof window.Tesseract.recognize === "function") {
+        tesseractState = {
+          ready: true,
+          loading: false,
+          error: null,
+        };
         window.clearInterval(timer);
         resolve(window.Tesseract);
         return;
       }
 
       if (Date.now() - startedAt > timeoutMs) {
+        tesseractState = {
+          ready: false,
+          loading: false,
+          error: "We had trouble getting the text helper ready.",
+        };
         window.clearInterval(timer);
-        reject(new Error("The text reader took too long to load."));
+        reject(new Error(tesseractState.error));
       }
     }, 250);
   });
 }
 
 export function getEngineStatusText() {
+  if (openCvState.loading || tesseractState.loading) {
+    return "Getting things ready...";
+  }
+
   if (openCvState.ready) {
-    return "Ready to scan. We will read the text when you hit Find Cards.";
+    return "Ready to go. Tap Find My Cards when you are set.";
   }
 
-  if (openCvState.error) {
-    return `${openCvState.error} One-card mode still works.`;
+  if (openCvState.error || tesseractState.error) {
+    return `${openCvState.error || tesseractState.error} You can still try one card at a time.`;
   }
 
-  return "Getting the scanner ready...";
+  return "Ready when you are.";
 }
 
 export async function loadImageFile(file) {
@@ -105,7 +145,7 @@ export async function detectCropsFromImage(dataUrl, mode) {
   }
 
   const image = await loadImage(dataUrl);
-  return [createSingleCrop(dataUrl, image.width, image.height, "We used the whole photo as one card because the page was hard to split.")];
+  return [createSingleCrop(dataUrl, image.width, image.height, "We kept the whole photo together because it was tough to split up.")];
 }
 
 export async function runOcr(dataUrl) {
@@ -243,7 +283,7 @@ function warpCrop(src, orderedPoints, scale, index) {
         right: Math.max(...scaledPoints.map((point) => point.x)),
         bottom: Math.max(...scaledPoints.map((point) => point.y)),
       },
-      note: "Found on the full page.",
+      note: "Pulled from the full photo.",
     };
   } finally {
     srcTri.delete();
@@ -346,4 +386,51 @@ function loadImage(source) {
     image.onerror = () => reject(new Error("Could not load that photo."));
     image.src = source;
   });
+}
+
+function loadScriptOnce(sourceUrl) {
+  if (scriptLoadPromises.has(sourceUrl)) {
+    return scriptLoadPromises.get(sourceUrl);
+  }
+
+  const existingScript = [...document.querySelectorAll("script")].find((script) => script.src === sourceUrl);
+  if (existingScript?.dataset.loaded === "true") {
+    return Promise.resolve();
+  }
+
+  const promise = new Promise((resolve, reject) => {
+    const script =
+      existingScript ||
+      Object.assign(document.createElement("script"), {
+        async: true,
+        src: sourceUrl,
+      });
+
+    const cleanup = () => {
+      script.removeEventListener("load", handleLoad);
+      script.removeEventListener("error", handleError);
+    };
+
+    const handleLoad = () => {
+      script.dataset.loaded = "true";
+      cleanup();
+      resolve();
+    };
+
+    const handleError = () => {
+      cleanup();
+      scriptLoadPromises.delete(sourceUrl);
+      reject(new Error(`Could not load ${sourceUrl}.`));
+    };
+
+    script.addEventListener("load", handleLoad);
+    script.addEventListener("error", handleError);
+
+    if (!existingScript) {
+      document.head.appendChild(script);
+    }
+  });
+
+  scriptLoadPromises.set(sourceUrl, promise);
+  return promise;
 }

@@ -20,12 +20,12 @@ const ALLOWED_SPORTS = new Set(["baseball", "football", "basketball"]);
 export function parseCatalogCsv(csvText) {
   const lines = csvText.replace(/^\uFEFF/, "").split(/\r?\n/);
   if (!lines.length || !lines[0].trim()) {
-    throw new Error("That CSV is empty.");
+    throw new Error("That sheet is empty.");
   }
 
   const header = parseCsvLine(lines[0]);
   if (header.join(",") !== EXPECTED_HEADER.join(",")) {
-    throw new Error("That file does not match the starter template.");
+    throw new Error("That sheet does not match the blank sheet.");
   }
 
   const cards = [];
@@ -124,13 +124,13 @@ function parseBoolean(value) {
 export function summarizeCatalog(cards, errors) {
   if (!cards.length) {
     return errors.length
-      ? `We could not use any cards from that file yet. ${errors.length} row${errors.length === 1 ? "" : "s"} still need fixing.`
-      : "Your card list is empty.";
+      ? `We could not use any cards from that sheet yet. ${errors.length} line${errors.length === 1 ? "" : "s"} still need fixing.`
+      : "Your list is empty.";
   }
 
   const sports = new Set(cards.map((card) => card.sport));
   const latestYear = Math.max(...cards.map((card) => card.year));
-  return `You have ${cards.length} cards in your list across ${sports.size} sport${sports.size === 1 ? "" : "s"}. Newest year: ${latestYear}.`;
+  return `You have ${cards.length} cards in your list across ${sports.size} sport${sports.size === 1 ? "" : "s"}. Newest card year: ${latestYear}.`;
 }
 
 export function tokenize(value) {

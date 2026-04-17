@@ -15,7 +15,7 @@ export function buildSoldSearchUrl(card) {
 export async function fetchPriceEstimate(card) {
   const query = buildSearchQuery(card);
   if (!query) {
-    throw new Error("Cannot price a card without a confirmed catalog match.");
+    throw new Error("Save the right card first, then check value.");
   }
 
   const response = await fetch(`/.netlify/functions/ebay-pricing?query=${encodeURIComponent(query)}`);
@@ -28,7 +28,7 @@ export async function fetchPriceEstimate(card) {
   }
 
   if (!response.ok) {
-    throw new Error(payload?.error || "Pricing lookup failed.");
+    throw new Error(payload?.error || "We could not grab a value right now.");
   }
 
   return {

@@ -1,4 +1,4 @@
-const STORAGE_KEY = "sports-card-scanner-mvp-web/v1";
+const STORAGE_KEY = "sports-card-scanner-mvp-web/v2";
 const SAVE_TIMEOUT_MS = 80;
 
 const defaultState = {
