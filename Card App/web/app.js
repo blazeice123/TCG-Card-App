@@ -24,8 +24,6 @@ import {
   loadImageFile,
   loadImageSource,
   runOcr,
-  waitForOpenCv,
-  waitForTesseract,
 } from "./scanner.js";
 import {
   createId,
@@ -42,11 +40,13 @@ const moneyFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
 
-const APP_VERSION = "v0.3.6";
+const APP_VERSION = "v0.3.8";
 const AUTO_LOOKUP_QUERY_LIMIT = 2;
+const DEBUG_HISTORY_KEY = "sports-card-scanner-mvp-web/debug-history/v1";
+const DEBUG_HISTORY_LIMIT = 80;
 
 let backgroundCropQueue = Promise.resolve();
-let scannerWarmStarted = false;
+let appDebugHistory = loadAppDebugHistory();
 
 const LIKELY_SET_TERMS = new Set([
   "topps",
@@ -135,7 +135,73 @@ const refs = {
   screens: [...document.querySelectorAll(".screen")],
 };
 
+function initializeAppDebugging() {
+  const lastEntry = appDebugHistory[appDebugHistory.length - 1] || null;
+  const previousEndedCleanly = lastEntry?.step === "page_hidden" || lastEntry?.step === "page_unloaded";
+
+  if (lastEntry && !previousEndedCleanly) {
+    recordAppDebugEvent("recovered_after_stop", "The app reopened after an abrupt stop or freeze.", {
+      afterStep: lastEntry.step,
+      afterMessage: lastEntry.message,
+    });
+  }
+
+  recordAppDebugEvent("app_opened", "App opened.", {
+    screen: ui.activeScreen,
+    build: APP_VERSION,
+  });
+
+  window.addEventListener("error", (event) => {
+    recordAppDebugEvent("window_error", event.message || "Browser error", {
+      source: event.filename || "",
+      line: event.lineno || "",
+      column: event.colno || "",
+    });
+  });
+
+  window.addEventListener("unhandledrejection", (event) => {
+    const reasonText =
+      event.reason instanceof Error
+        ? `${event.reason.name}: ${event.reason.message}`
+        : String(event.reason || "Unknown promise rejection");
+    recordAppDebugEvent("promise_error", reasonText);
+  });
+
+  window.addEventListener("pagehide", () => {
+    recordAppDebugEvent("page_hidden", "Page is being hidden or closed.", {
+      screen: ui.activeScreen,
+    });
+  });
+
+  window.addEventListener("beforeunload", () => {
+    recordAppDebugEvent("page_unloaded", "Page is unloading.", {
+      screen: ui.activeScreen,
+    });
+  });
+
+  if ("PerformanceObserver" in window) {
+    try {
+      const observer = new PerformanceObserver((list) => {
+        list.getEntries().forEach((entry) => {
+          if (entry.duration < 700) {
+            return;
+          }
+
+          recordAppDebugEvent("long_task", `Main thread was blocked for ${Math.round(entry.duration)}ms.`, {
+            durationMs: Math.round(entry.duration),
+            name: entry.name || "",
+          });
+        });
+      });
+      observer.observe({ entryTypes: ["longtask"] });
+    } catch (error) {
+      console.warn("Long-task observer was not available.", error);
+    }
+  }
+}
+
 bindEvents();
+initializeAppDebugging();
 bootstrapEngines();
 cleanupCachedShell();
 render();
@@ -187,7 +253,7 @@ function bindEvents() {
   refs.clearSessionButton.addEventListener("click", () => {
     resetSessions(state);
     ui.selectedCropId = null;
-    ui.pendingSourcePreview = null;
+    clearPendingSourcePreview();
     refs.imageInput.value = "";
     setStatus("That photo is cleared.");
     render();
@@ -247,7 +313,6 @@ async function bootstrapEngines() {
 }
 
 function triggerImagePicker() {
-  warmUpScannerEngines();
   refs.imageInput.value = "";
   refs.imageInput.click();
 }
@@ -302,13 +367,16 @@ async function handleImageSelected(event) {
     return;
   }
 
-  const preview = await fileToDataUrl(file).catch(() => null);
-  ui.pendingSourcePreview = preview
-    ? {
-        name: file.name,
-        dataUrl: preview,
-      }
-    : null;
+  setPendingSourcePreview({
+    name: file.name,
+    previewUrl: URL.createObjectURL(file),
+    usesObjectUrl: true,
+  });
+  recordAppDebugEvent("photo_picked", "Picked a photo from the device.", {
+    fileName: file.name,
+    sizeKb: Math.round((file.size || 0) / 1024),
+    type: file.type || "",
+  });
 
   showScreen("scan");
   setStatus(`Picked ${file.name}. Tap Find My Cards when you are ready.`);
@@ -316,7 +384,6 @@ async function handleImageSelected(event) {
 }
 
 async function handleGenerateDemoImage() {
-  warmUpScannerEngines();
   const mode = state.appSettings.lastScanMode || "page";
   if (!state.catalogCards.length) {
     loadDemoCatalog();
@@ -327,10 +394,14 @@ async function handleGenerateDemoImage() {
   await pauseForUi();
   const demoImage = generateDemoImage(mode);
   refs.imageInput.value = "";
-  ui.pendingSourcePreview = {
+  setPendingSourcePreview({
     name: demoImage.name,
     dataUrl: demoImage.dataUrl,
-  };
+  });
+  recordAppDebugEvent("demo_photo_ready", "Loaded a sample photo.", {
+    mode,
+    sourceName: demoImage.name,
+  });
 
   showScreen("scan");
   setStatus(
@@ -341,25 +412,18 @@ async function handleGenerateDemoImage() {
   render();
 }
 
-function warmUpScannerEngines() {
-  if (scannerWarmStarted) {
-    return;
+function setPendingSourcePreview(preview) {
+  clearPendingSourcePreview();
+  ui.pendingSourcePreview = preview || null;
+}
+
+function clearPendingSourcePreview() {
+  const previewUrl = ui.pendingSourcePreview?.previewUrl;
+  if (previewUrl && ui.pendingSourcePreview?.usesObjectUrl) {
+    URL.revokeObjectURL(previewUrl);
   }
 
-  scannerWarmStarted = true;
-  const startWarmup = () => {
-    Promise.allSettled([waitForOpenCv(), waitForTesseract()]).finally(() => {
-      refs.engineStatus.textContent = getEngineStatusText();
-      render();
-    });
-  };
-
-  if ("requestIdleCallback" in window) {
-    window.requestIdleCallback(startWarmup, { timeout: 900 });
-    return;
-  }
-
-  window.setTimeout(startWarmup, 0);
+  ui.pendingSourcePreview = null;
 }
 
 function applyLaunchPreset() {
@@ -531,7 +595,7 @@ async function seedDemoResults() {
 
   state.scanSessions = [session];
   ui.selectedCropId = session.crops.find((crop) => crop.reviewStatus === "pending")?.cropId || session.crops[0]?.cropId || null;
-  ui.pendingSourcePreview = null;
+  clearPendingSourcePreview();
   ui.activeScreen = "collection";
   saveState(state);
   setStatus("Sample cards are loaded, so you can tap around right away.");
@@ -543,6 +607,7 @@ async function handleScan() {
   const previewSource = ui.pendingSourcePreview;
   if ((!file && !previewSource) || ui.scanBusy) {
     if (!file && !previewSource) {
+      recordAppDebugEvent("scan_blocked", "Scan was tapped without a photo ready.");
       setStatus("Pick a photo first.");
     }
     return;
@@ -553,18 +618,27 @@ async function handleScan() {
   refs.scanButton.textContent = "Working...";
 
   try {
-    warmUpScannerEngines();
     const mode = state.appSettings.lastScanMode || "page";
+    recordAppDebugEvent("scan_started", "Started scanning a photo.", {
+      mode,
+      sourceName: file?.name || previewSource?.name || "unknown",
+      sourceKind: file ? "file" : previewSource?.usesObjectUrl ? "picked_preview" : "saved_preview",
+    });
     setStatus("Getting your photo ready...");
     render();
     await pauseForUi();
     const loaded = file
       ? await loadImageFile(file)
-      : await loadImageSource(previewSource.dataUrl, previewSource.name);
-    ui.pendingSourcePreview = {
+      : await loadImageSource(previewSource.dataUrl || previewSource.previewUrl, previewSource.name);
+    recordAppDebugEvent("photo_loaded", "Loaded the photo into the scanner.", {
+      sourceName: loaded.fileName,
+      width: loaded.image?.width || "",
+      height: loaded.image?.height || "",
+    });
+    setPendingSourcePreview({
       name: loaded.fileName,
       dataUrl: loaded.dataUrl,
-    };
+    });
 
     const session = {
       sessionId: createId("session"),
@@ -582,7 +656,14 @@ async function handleScan() {
 
     setStatus(mode === "page" ? "Looking for cards in your photo..." : "Using single-card view...");
     render();
+    recordAppDebugEvent("detect_started", "Started card detection.", {
+      mode,
+    });
     const detectedCrops = await detectCropsFromImage(loaded.dataUrl, mode);
+    recordAppDebugEvent("detect_done", "Finished card detection.", {
+      mode,
+      cropCount: detectedCrops.length,
+    });
     const scannedAtBase = Date.now();
     session.crops = detectedCrops.map((detectedCrop, index) => ({
       cropId: detectedCrop.cropId,
@@ -641,7 +722,7 @@ async function handleScan() {
 
     session.status = "review";
     ui.selectedCropId = session.crops[0]?.cropId || null;
-    ui.pendingSourcePreview = null;
+    clearPendingSourcePreview();
     ensureSelectedCrop();
     showScreen("review");
     saveState(state);
@@ -653,6 +734,11 @@ async function handleScan() {
     render();
 
     detectedCrops.forEach((detectedCrop, index) => {
+      recordAppDebugEvent("crop_queued", "Queued a card for OCR and search.", {
+        cropId: detectedCrop.cropId,
+        cropIndex: index + 1,
+        totalCrops: detectedCrops.length,
+      });
       queueBackgroundCropAnalysis({
         cropId: detectedCrop.cropId,
         detectedCrop,
@@ -661,6 +747,7 @@ async function handleScan() {
       });
     });
   } catch (error) {
+    recordAppDebugEvent("scan_error", error.message || "Scan failed.");
     setStatus(`That photo did not work. ${error.message}`);
   } finally {
     ui.scanBusy = false;
@@ -686,6 +773,11 @@ async function processDetectedCrop({ cropId, detectedCrop, cropIndex, totalCrops
     return;
   }
 
+  recordAppDebugEvent("ocr_started", "Started reading one card.", {
+    cropId,
+    cropIndex: cropIndex + 1,
+    totalCrops,
+  });
   const ocrResult = await runOcr(detectedCrop.imageDataUrl).catch((error) => ({
     text: "",
     confidence: null,
@@ -693,6 +785,13 @@ async function processDetectedCrop({ cropId, detectedCrop, cropIndex, totalCrops
     imageDataUrl: detectedCrop.imageDataUrl,
     rotation: 0,
   }));
+  recordAppDebugEvent("ocr_done", "Finished reading one card.", {
+    cropId,
+    confidence: Number.isFinite(ocrResult.confidence) ? `${Math.round(ocrResult.confidence * 100)}%` : "",
+    rotation: ocrResult.rotation || 0,
+    chars: (ocrResult.text || "").length,
+    error: ocrResult.error || "",
+  });
 
   const selected = findCropEntryById(cropId);
   if (!selected) {
@@ -751,6 +850,10 @@ async function processDetectedCrop({ cropId, detectedCrop, cropIndex, totalCrops
   render();
 
   if (!automaticPrimaryQuery) {
+    recordAppDebugEvent("lookup_skipped", "Skipped the automatic eBay search because the read was too rough.", {
+      cropId,
+      reason: skipReason,
+    });
     setStatus(
       totalCrops === 1
         ? "We read the card, but the search words are still too rough. Add a player, year, set, or card number and tap Search eBay."
@@ -839,6 +942,16 @@ async function handleReviewClick(event) {
     return;
   }
 
+  if (action === "copy-app-debug") {
+    await copyAppDebugHistory();
+    return;
+  }
+
+  if (action === "share-app-debug") {
+    await shareAppDebugHistory();
+    return;
+  }
+
   const selected = getSelectedCrop();
   if (!selected) {
     return;
@@ -882,9 +995,17 @@ async function handleReviewClick(event) {
 async function confirmSelectedCrop(selected) {
   const candidate = findSelectedCandidate(selected.crop);
   if (!candidate) {
+    recordAppDebugEvent("confirm_blocked", "Tried to save without a picked match.", {
+      cropId: selected.crop.cropId,
+    });
     setStatus("Pick the right eBay card first, or search again.");
     return;
   }
+
+  recordAppDebugEvent("confirm_started", "Saving the picked card.", {
+    cropId: selected.crop.cropId,
+    title: candidate.title || candidate.playerName || "",
+  });
 
   const previousTopCandidateId = selected.crop.matchCandidates[0]?.catalogCardId || "";
   if (previousTopCandidateId && previousTopCandidateId !== selected.crop.selectedCatalogCardId) {
@@ -927,8 +1048,15 @@ async function confirmSelectedCrop(selected) {
     if (pricing.mode === "automatic" && Number.isFinite(pricing.estimate)) {
       const snapshot = savePriceSnapshot(collectionCard.collectionCardId, pricing.estimate, pricing);
       collectionCard.latestPriceSnapshotId = snapshot.priceSnapshotId;
+      recordAppDebugEvent("confirm_saved", "Saved the card with automatic pricing.", {
+        cropId: selected.crop.cropId,
+        estimate: pricing.estimate,
+      });
       setStatus(`Saved ${candidate.playerName || "that card"} with recent eBay sales.`);
     } else {
+      recordAppDebugEvent("confirm_saved", "Saved the card without an automatic price.", {
+        cropId: selected.crop.cropId,
+      });
       setStatus(`Saved ${candidate.playerName || "that card"}. Add a sale price if you want one now.`);
     }
   } catch (error) {
@@ -939,6 +1067,9 @@ async function confirmSelectedCrop(selected) {
         candidate.pricingQuery || candidate.title || candidate.searchQuery || selected.crop.manualSearch || selected.crop.searchQuery || "",
       ),
     };
+    recordAppDebugEvent("pricing_error", error.message || "Automatic pricing failed.", {
+      cropId: selected.crop.cropId,
+    });
     setStatus(`Saved ${candidate.playerName || "that card"}. You can add a price yourself from eBay sales.`);
   }
 
@@ -960,6 +1091,9 @@ function saveUnknownCrop(selected) {
     createdAt: new Date().toISOString(),
   });
 
+  recordAppDebugEvent("saved_for_later", "Saved a card for later without forcing a match.", {
+    cropId: selected.crop.cropId,
+  });
   saveState(state);
   setStatus("Saved this card for later without forcing a bad guess.");
   render();
@@ -969,6 +1103,9 @@ function saveManualPrice(selected) {
   const input = refs.reviewPane.querySelector('[name="manualPrice"]');
   const value = Number.parseFloat(input?.value || "");
   if (!Number.isFinite(value) || value <= 0) {
+    recordAppDebugEvent("manual_price_blocked", "Tried to save a manual price without a valid number.", {
+      cropId: selected.crop.cropId,
+    });
     setStatus("Type in a sale price first.");
     return;
   }
@@ -1005,6 +1142,10 @@ function saveManualPrice(selected) {
     };
   }
 
+  recordAppDebugEvent("manual_price_saved", "Saved a manual price.", {
+    cropId: selected.crop.cropId,
+    value,
+  });
   saveState(state);
   setStatus("Saved that price to your collection.");
   render();
@@ -1126,7 +1267,11 @@ function render() {
 }
 
 function renderPreview(latestSession) {
-  const previewSource = ui.pendingSourcePreview?.dataUrl || latestSession?.sourceDataUrl || "";
+  const previewSource =
+    ui.pendingSourcePreview?.previewUrl ||
+    ui.pendingSourcePreview?.dataUrl ||
+    latestSession?.sourceDataUrl ||
+    "";
   const previewLabel = ui.pendingSourcePreview?.name || latestSession?.sourceName || "Selected scan";
 
   if (previewSource) {
@@ -1247,7 +1392,10 @@ function renderCollectionCards(cards) {
 function renderReviewPane(allCrops) {
   const selected = getSelectedCrop();
   if (!selected) {
-    return renderEmptyCard("Pick a card", "Tap a card from Recent or Scan to see it here.");
+    return `
+      ${renderEmptyCard("Pick a card", "Tap a card from Recent or Scan to see it here.")}
+      ${renderAppDebugCard()}
+    `;
   }
 
   const currentCard = findSelectedCandidate(selected.crop);
@@ -1422,6 +1570,20 @@ function renderLookupStateCard(crop) {
   }
 }
 
+function renderAppDebugCard() {
+  const debugText = formatAppDebugHistory();
+  return `
+    <details class="debug-card" open>
+      <summary>App Debug History</summary>
+      <pre class="debug-card__block">${escapeHtml(debugText)}</pre>
+      <div class="button-row">
+        <button class="button" type="button" data-action="share-app-debug">Share App History</button>
+        <button class="button button--ghost" type="button" data-action="copy-app-debug">Copy App History</button>
+      </div>
+    </details>
+  `;
+}
+
 function renderDebugCard(crop) {
   const debugText = formatDebugInfo(crop);
   return `
@@ -1433,6 +1595,7 @@ function renderDebugCard(crop) {
         <button class="button button--ghost" type="button" data-action="copy-debug">Copy Debug Info</button>
       </div>
     </details>
+    ${renderAppDebugCard()}
   `;
 }
 
@@ -2079,6 +2242,9 @@ async function searchSelectedCropOnEbay(selected) {
   const query = String(queryVariants[0] || "").trim();
   const useImageLookup = !query;
   if (!query && !selected.crop.imageDataUrl) {
+    recordAppDebugEvent("lookup_blocked", "Manual eBay search was tapped without enough info.", {
+      cropId: selected.crop.cropId,
+    });
     setStatus("Give eBay a few words first, like player, year, set, or card number.");
     return;
   }
@@ -2132,6 +2298,14 @@ async function runCropLookup({ cropId, searchReason, queryVariantDetails, imageD
   const queryVariants = (queryVariantDetails || []).map((entry) => entry.query);
   const primaryQuery = String(queryVariants[0] || "").trim();
   const useImageLookup = Boolean(imageDataUrl) && !primaryQuery;
+  recordAppDebugEvent("lookup_started", "Started looking for close eBay cards.", {
+    cropId,
+    searchReason,
+    primaryQuery: primaryQuery || "(photo only)",
+    useImage: useImageLookup ? "yes" : "no",
+    queryCount: queryVariants.length,
+    searchStyle,
+  });
 
   try {
     const lookupResult = await fetchCandidatesForCrop({
@@ -2174,6 +2348,12 @@ async function runCropLookup({ cropId, searchReason, queryVariantDetails, imageD
       lookupMessage: refreshedCrop.lookupMessage,
       searchStyle,
     });
+    recordAppDebugEvent("lookup_done", "Finished the eBay lookup.", {
+      cropId,
+      candidateCount: candidates.length,
+      topTitle: candidates[0]?.title || candidates[0]?.playerName || "",
+      primaryQuery: primaryQuery || "(photo only)",
+    });
     saveState(state);
     setStatus(
       candidates.length
@@ -2210,6 +2390,10 @@ async function runCropLookup({ cropId, searchReason, queryVariantDetails, imageD
       lookupState: refreshed.crop.lookupState,
       lookupMessage: refreshed.crop.lookupMessage,
       searchStyle,
+    });
+    recordAppDebugEvent("lookup_error", error.message || "eBay lookup failed.", {
+      cropId,
+      primaryQuery: primaryQuery || "(photo only)",
     });
     saveState(state);
     setStatus(`eBay search hit a snag. ${error.message}`);
@@ -2252,6 +2436,79 @@ function buildLookupAttempt(query, matchData, usedImage) {
     candidateCount: candidates.length,
     topTitles: candidates.slice(0, 3).map((candidate) => candidate.title || candidate.playerName || "").filter(Boolean),
   };
+}
+
+function loadAppDebugHistory() {
+  try {
+    const raw = window.localStorage.getItem(DEBUG_HISTORY_KEY);
+    const parsed = JSON.parse(raw || "[]");
+    return Array.isArray(parsed) ? parsed.slice(-DEBUG_HISTORY_LIMIT) : [];
+  } catch (error) {
+    console.warn("Could not load app debug history.", error);
+    return [];
+  }
+}
+
+function persistAppDebugHistory() {
+  try {
+    window.localStorage.setItem(DEBUG_HISTORY_KEY, JSON.stringify(appDebugHistory.slice(-DEBUG_HISTORY_LIMIT)));
+  } catch (error) {
+    console.warn("Could not save app debug history.", error);
+  }
+}
+
+function sanitizeDebugMeta(meta = {}) {
+  return Object.fromEntries(
+    Object.entries(meta)
+      .map(([key, value]) => [key, value == null ? "" : String(value).trim()])
+      .filter(([, value]) => value !== ""),
+  );
+}
+
+function recordAppDebugEvent(step, message, meta = {}) {
+  const now = Date.now();
+  const previous = appDebugHistory[appDebugHistory.length - 1] || null;
+  const previousAt = previous ? new Date(previous.at).getTime() : now;
+  const entry = {
+    at: new Date(now).toISOString(),
+    step: String(step || "event"),
+    message: String(message || "").trim(),
+    screen: ui?.activeScreen || "",
+    sinceLastMs: Math.max(0, now - previousAt),
+    meta: sanitizeDebugMeta(meta),
+  };
+
+  appDebugHistory.push(entry);
+  appDebugHistory = appDebugHistory.slice(-DEBUG_HISTORY_LIMIT);
+  persistAppDebugHistory();
+  return entry;
+}
+
+function formatAppDebugHistoryLines(limit = 18) {
+  const entries = appDebugHistory.slice(-limit);
+  if (!entries.length) {
+    return "none";
+  }
+
+  return entries
+    .map((entry, index) => {
+      const metaText = Object.entries(entry.meta || {})
+        .map(([key, value]) => `${key}=${value}`)
+        .join(" | ");
+      return `${index + 1}. ${entry.at} | ${entry.step} | ${entry.message || "-"}${entry.screen ? ` | screen=${entry.screen}` : ""}${
+        entry.sinceLastMs ? ` | +${entry.sinceLastMs}ms` : ""
+      }${metaText ? ` | ${metaText}` : ""}`;
+    })
+    .join("\n");
+}
+
+function formatAppDebugHistory() {
+  return [
+    `Build: ${APP_VERSION}`,
+    `When copied: ${new Date().toISOString()}`,
+    `Saved events: ${appDebugHistory.length}`,
+    `Recent app events:\n${formatAppDebugHistoryLines()}`,
+  ].join("\n");
 }
 
 function buildLookupDebugInfo({
@@ -2353,7 +2610,40 @@ function formatDebugInfo(crop) {
     `Why these queries:\n${queryReasonLines}`,
     `Lookup attempts:\n${attemptLines}`,
     `Final candidates:\n${finalCandidateLines}`,
+    `Recent app history:\n${formatAppDebugHistoryLines(14)}`,
   ].join("\n");
+}
+
+async function copyAppDebugHistory() {
+  const debugText = formatAppDebugHistory();
+  try {
+    await navigator.clipboard.writeText(debugText);
+    setStatus("Copied the app history. Paste it here and I can see the last steps before things went sideways.");
+  } catch (error) {
+    setStatus("Could not copy automatically. You can still select the app history box text and paste it here.");
+  }
+}
+
+async function shareAppDebugHistory() {
+  const debugText = formatAppDebugHistory();
+  if (!navigator.share) {
+    await copyAppDebugHistory();
+    return;
+  }
+
+  try {
+    await navigator.share({
+      title: `Card Scanner App History ${APP_VERSION}`,
+      text: debugText,
+    });
+    setStatus("Opened the share sheet for the app history.");
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      return;
+    }
+
+    await copyAppDebugHistory();
+  }
 }
 
 async function copyCropDebugInfo(selected) {
@@ -2391,6 +2681,10 @@ async function shareCropDebugInfo(selected) {
 function setStatus(message) {
   ui.statusMessage = message;
   refs.statusBanner.textContent = ui.statusMessage;
+  const lastEntry = appDebugHistory[appDebugHistory.length - 1] || null;
+  if (lastEntry?.step !== "status" || lastEntry?.message !== ui.statusMessage) {
+    recordAppDebugEvent("status", ui.statusMessage);
+  }
 }
 
 async function cleanupCachedShell() {
