@@ -40,6 +40,37 @@ const moneyFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
 
+const APP_VERSION = "v0.3.1";
+
+const LIKELY_SET_TERMS = new Set([
+  "topps",
+  "traded",
+  "update",
+  "donruss",
+  "fleer",
+  "bowman",
+  "score",
+  "leaf",
+  "upper",
+  "deck",
+  "club",
+  "stadium",
+  "chrome",
+  "heritage",
+  "finest",
+  "hoops",
+  "panini",
+  "prizm",
+  "select",
+  "optic",
+  "mosaic",
+  "contenders",
+  "pinnacle",
+  "base",
+  "rookie",
+  "rc",
+]);
+
 const state = loadState();
 
 const ui = {
@@ -92,6 +123,7 @@ const refs = {
   demoResultsButton: document.querySelector("#demoResultsButton"),
   exportCollectionButton: document.querySelector("#exportCollectionButton"),
   resetCollectionButton: document.querySelector("#resetCollectionButton"),
+  appVersion: document.querySelector("#appVersion"),
   navButtons: [...document.querySelectorAll(".bottom-nav__item")],
   screenJumpButtons: [...document.querySelectorAll("[data-screen-jump]")],
   screens: [...document.querySelectorAll(".screen")],
@@ -534,10 +566,18 @@ async function handleScan() {
         rotation: 0,
       }));
       const finalCropImageDataUrl = ocrResult.imageDataUrl || detectedCrop.imageDataUrl;
-      const searchQuery = buildEbaySearchText(ocrResult.text);
+      const inferredDetails = inferManualDetails(ocrResult.text, buildEbaySearchText(ocrResult.text));
+      const queryVariants = buildSearchQueryVariants({
+        manualSearch: buildEbaySearchText(ocrResult.text),
+        manualDetails: inferredDetails,
+        searchQuery: buildEbaySearchText(ocrResult.text),
+        ocrText: ocrResult.text,
+      });
+      const searchQuery = queryVariants[0] || buildEbaySearchText(ocrResult.text);
       const candidates = await fetchCandidatesForCrop({
         searchQuery,
         imageDataUrl: finalCropImageDataUrl,
+        fallbackQueries: queryVariants.slice(1),
       });
 
       session.crops.push({
@@ -554,7 +594,7 @@ async function handleScan() {
         matchCandidates: candidates,
         selectedCatalogCardId: candidates[0]?.catalogCardId || "",
         manualSearch: searchQuery,
-        manualDetails: inferManualDetails(ocrResult.text, searchQuery),
+        manualDetails: inferredDetails,
         searchQuery,
         reviewStatus: "pending",
         unknownFlag: false,
@@ -926,6 +966,7 @@ function render() {
   refs.cropGrid.innerHTML = renderScanCropRail(latestSession?.crops || []);
   refs.reviewPane.innerHTML = renderReviewPane(allCrops);
   refs.catalogTableBody.innerHTML = renderCatalogRows();
+  refs.appVersion.textContent = `Build ${APP_VERSION}`;
 
   renderPreview(latestSession);
   renderActiveScreen();
@@ -1054,7 +1095,7 @@ function renderReviewPane(allCrops) {
 
   const currentCard = findSelectedCandidate(selected.crop);
   const manualDetails = getManualDetails(selected.crop);
-  const searchPreview = buildManualSearchFromDetails(manualDetails) || selected.crop.manualSearch || selected.crop.searchQuery || "";
+  const searchPreview = getPreferredSearchText(selected.crop);
 
   return `
     <div class="review-label">Cards from your photo</div>
@@ -1081,7 +1122,7 @@ function renderReviewPane(allCrops) {
       </div>
       <label class="input-group">
         <span>Search eBay</span>
-        <input type="search" name="manualSearch" value="${escapeAttribute(selected.crop.manualSearch || "")}" placeholder="Player, year, set, or card number" />
+        <input type="search" name="manualSearch" value="${escapeAttribute(searchPreview)}" placeholder="Player, year, set, or card number" />
       </label>
       <div class="small-copy">Tip: leave this blank if you want us to lean on the card photo first.</div>
       <div class="review-note">
@@ -1464,10 +1505,10 @@ function hasManualDetails(details) {
 
 function buildManualSearchFromDetails(details) {
   return [
+    String(details?.player || "").trim(),
     String(details?.year || "").trim(),
     String(details?.brandSet || "").trim(),
     String(details?.cardNumber || "").trim(),
-    String(details?.player || "").trim(),
   ]
     .filter(Boolean)
     .join(" ")
@@ -1514,8 +1555,8 @@ function inferBrandSet(normalizedSearch, year, cardNumber, player) {
 
   return normalizedSearch
     .split(" ")
-    .filter((token) => token && !tokensToSkip.has(token))
-    .slice(0, 4)
+    .filter((token) => token && !tokensToSkip.has(token) && LIKELY_SET_TERMS.has(token))
+    .slice(0, 3)
     .join(" ")
     .trim();
 }
@@ -1526,6 +1567,57 @@ function pickLikelyCardNumber(sourceText, year) {
   return nonYearMatch || matches[0] || "";
 }
 
+function buildSearchQueryVariants(crop) {
+  const details = getManualDetails(crop);
+  const player = String(details.player || "").trim();
+  const year = String(details.year || "").trim();
+  const brandSet = String(details.brandSet || "").trim();
+  const cardNumber = String(details.cardNumber || "").trim();
+  const manualSearch = String(crop?.manualSearch || "").trim();
+  const savedSearch = String(crop?.searchQuery || "").trim();
+  const ocrQuery = buildEbaySearchText(crop?.ocrText || "");
+  const customManualSearch =
+    manualSearch &&
+    manualSearch.toLowerCase() !== savedSearch.toLowerCase() &&
+    manualSearch.toLowerCase() !== ocrQuery.toLowerCase()
+      ? manualSearch
+      : "";
+
+  return uniqueQueries([
+    customManualSearch,
+    buildManualSearchFromDetails(details),
+    savedSearch,
+    manualSearch,
+    [player, year, cardNumber].filter(Boolean).join(" "),
+    [player, brandSet, cardNumber].filter(Boolean).join(" "),
+    [player, year, brandSet].filter(Boolean).join(" "),
+    [player, cardNumber].filter(Boolean).join(" "),
+    [player, year].filter(Boolean).join(" "),
+    player,
+    ocrQuery,
+  ]);
+}
+
+function getPreferredSearchText(crop) {
+  return buildSearchQueryVariants(crop)[0] || String(crop?.manualSearch || crop?.searchQuery || "").trim();
+}
+
+function uniqueQueries(queries) {
+  const seen = new Set();
+  return queries
+    .map((query) => String(query || "").replace(/\s+/g, " ").trim())
+    .filter((query) => query.length >= 3)
+    .filter((query) => {
+      const normalized = query.toLowerCase();
+      if (seen.has(normalized)) {
+        return false;
+      }
+
+      seen.add(normalized);
+      return true;
+    });
+}
+
 function findSelectedCandidate(crop) {
   if (!crop) {
     return null;
@@ -1534,28 +1626,53 @@ function findSelectedCandidate(crop) {
   return crop.matchCandidates.find((candidate) => candidate.catalogCardId === crop.selectedCatalogCardId) || null;
 }
 
-async function fetchCandidatesForCrop({ searchQuery, imageDataUrl } = {}) {
-  if (!searchQuery && !imageDataUrl) {
+async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueries = [] } = {}) {
+  const queryQueue = uniqueQueries([searchQuery, ...fallbackQueries]);
+  if (!queryQueue.length && !imageDataUrl) {
     return [];
   }
 
-  const matchData = await fetchEbayMatches({
-    searchQuery,
-    imageDataUrl,
-    limit: 6,
-  });
+  const merged = [];
+  const seen = new Set();
 
-  return matchData.candidates || [];
+  if (!queryQueue.length && imageDataUrl) {
+    const matchData = await fetchEbayMatches({
+      searchQuery: "",
+      imageDataUrl,
+      limit: 6,
+    });
+    return matchData.candidates || [];
+  }
+
+  for (let index = 0; index < queryQueue.length; index += 1) {
+    const query = queryQueue[index];
+    const matchData = await fetchEbayMatches({
+      searchQuery: query,
+      imageDataUrl: index === 0 ? imageDataUrl : "",
+      limit: 6,
+    });
+
+    (matchData.candidates || []).forEach((candidate) => {
+      const key = candidate.itemWebUrl || candidate.catalogCardId || candidate.title;
+      if (!key || seen.has(key)) {
+        return;
+      }
+
+      seen.add(key);
+      merged.push(candidate);
+    });
+
+    if (merged.length >= 6) {
+      break;
+    }
+  }
+
+  return merged.slice(0, 6);
 }
 
 async function searchSelectedCropOnEbay(selected) {
-  const details = getManualDetails(selected.crop);
-  const detailsQuery = buildManualSearchFromDetails(details);
-  const query = String(
-    hasManualDetails(details)
-      ? detailsQuery
-      : selected.crop.manualSearch || selected.crop.searchQuery || buildEbaySearchText(selected.crop.ocrText),
-  ).trim();
+  const queryVariants = buildSearchQueryVariants(selected.crop);
+  const query = String(queryVariants[0] || "").trim();
   if (!query && !selected.crop.imageDataUrl) {
     setStatus("Give eBay a few words first, like player, year, set, or card number.");
     return;
@@ -1570,6 +1687,7 @@ async function searchSelectedCropOnEbay(selected) {
     const candidates = await fetchCandidatesForCrop({
       searchQuery: query,
       imageDataUrl: selected.crop.imageDataUrl,
+      fallbackQueries: queryVariants.slice(1),
     });
     selected.crop.matchCandidates = candidates;
     selected.crop.selectedCatalogCardId = candidates[0]?.catalogCardId || "";
@@ -1589,8 +1707,7 @@ async function searchSelectedCropOnEbay(selected) {
 }
 
 function openSelectedCropOnEbay(selected) {
-  const details = getManualDetails(selected.crop);
-  const query = buildManualSearchFromDetails(details) || selected.crop.manualSearch || selected.crop.searchQuery || "";
+  const query = buildSearchQueryVariants(selected.crop)[0] || "";
   if (!query) {
     setStatus("Add a player, year, set, or card number first, then open eBay.");
     return;

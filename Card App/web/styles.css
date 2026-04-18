@@ -911,6 +911,16 @@ textarea::placeholder {
   backdrop-filter: blur(12px);
 }
 
+.app-version {
+  padding: 0 18px 14px;
+  text-align: center;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  background: rgba(5, 10, 24, 0.22);
+}
+
 .bottom-nav__item {
   border: 0;
   background: none;
