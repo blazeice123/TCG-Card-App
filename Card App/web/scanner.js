@@ -130,8 +130,18 @@ export async function loadImageSource(dataUrl, fileName = "Selected photo") {
 
 export async function detectCropsFromImage(dataUrl, mode) {
   if (mode === "single") {
+    try {
+      await waitForOpenCv();
+      const detectedSingle = await detectSingleCard(dataUrl);
+      if (detectedSingle) {
+        return [detectedSingle];
+      }
+    } catch (error) {
+      console.warn("Single-card detection failed. Falling back to the whole photo.", error);
+    }
+
     const image = await loadImage(dataUrl);
-    return [createSingleCrop(dataUrl, image.width, image.height)];
+    return [createSingleCrop(dataUrl, image.width, image.height, "Used the whole photo because we could not isolate one clear card.")];
   }
 
   try {
@@ -177,10 +187,50 @@ export async function runOcr(dataUrl) {
     }
   }
 
+  if (scoreOcrCandidate(bestCandidate) < 0.58) {
+    const boostedDataUrl = await createHighContrastImage(bestCandidate.imageDataUrl);
+    const boostedCandidate = await recognizeOcrCandidate(tesseract, boostedDataUrl, bestCandidate.rotation || 0);
+    const scoredBoostedCandidate = {
+      ...boostedCandidate,
+      imageDataUrl: boostedDataUrl,
+    };
+
+    if (scoreOcrCandidate(scoredBoostedCandidate) > scoreOcrCandidate(bestCandidate) + 0.03) {
+      bestCandidate = scoredBoostedCandidate;
+    }
+  }
+
   return bestCandidate;
 }
 
 async function detectPageCards(dataUrl) {
+  return detectCardRects(dataUrl, {
+    minAreaRatio: 0.035,
+    aspectMin: 0.55,
+    aspectMax: 0.8,
+    rectangularityMin: 0.72,
+    maxCards: 16,
+    note: "Pulled from the full photo.",
+  });
+}
+
+async function detectSingleCard(dataUrl) {
+  const detected = await detectCardRects(dataUrl, {
+    minAreaRatio: 0.12,
+    aspectMin: 0.48,
+    aspectMax: 0.86,
+    rectangularityMin: 0.52,
+    maxCards: 1,
+    note: "Pulled the main card from the photo.",
+  });
+
+  return detected[0] || null;
+}
+
+async function detectCardRects(
+  dataUrl,
+  { minAreaRatio, aspectMin, aspectMax, rectangularityMin, maxCards, note },
+) {
   const cv = window.cv;
   const image = await loadImage(dataUrl);
   const { canvas, scale } = drawScaledImage(image, MAX_DIMENSION);
@@ -201,7 +251,7 @@ async function detectPageCards(dataUrl) {
     cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
     const foundRects = [];
-    const minArea = canvas.width * canvas.height * 0.035;
+    const minArea = canvas.width * canvas.height * minAreaRatio;
 
     for (let index = 0; index < contours.size(); index += 1) {
       const contour = contours.get(index);
@@ -231,7 +281,7 @@ async function detectPageCards(dataUrl) {
         const boundingRect = cv.boundingRect(contour);
         const rectangularity = area / Math.max(boundingRect.width * boundingRect.height, 1);
 
-        if (aspectRatio > 0.55 && aspectRatio < 0.8 && rectangularity > 0.72) {
+        if (aspectRatio > aspectMin && aspectRatio < aspectMax && rectangularity > rectangularityMin) {
           foundRects.push({
             area,
             orderedPoints,
@@ -247,9 +297,9 @@ async function detectPageCards(dataUrl) {
     const filteredRects = suppressOverlaps(
       foundRects.sort((left, right) => right.area - left.area),
       0.22,
-    ).slice(0, 16);
+    ).slice(0, maxCards);
 
-    return filteredRects.map((entry, index) => warpCrop(src, entry.orderedPoints, scale, index));
+    return filteredRects.map((entry, index) => warpCrop(src, entry.orderedPoints, scale, index, note));
   } finally {
     src.delete();
     gray.delete();
@@ -261,7 +311,7 @@ async function detectPageCards(dataUrl) {
   }
 }
 
-function warpCrop(src, orderedPoints, scale, index) {
+function warpCrop(src, orderedPoints, scale, index, note = "Pulled from the photo.") {
   const cv = window.cv;
   const srcTri = cv.matFromArray(
     4,
@@ -306,7 +356,7 @@ function warpCrop(src, orderedPoints, scale, index) {
         right: Math.max(...scaledPoints.map((point) => point.x)),
         bottom: Math.max(...scaledPoints.map((point) => point.y)),
       },
-      note: "Pulled from the full photo.",
+      note,
     };
   } finally {
     srcTri.delete();
@@ -411,6 +461,32 @@ async function rotateImageDataUrl(dataUrl, angle) {
   context.rotate((normalizedAngle * Math.PI) / 180);
   context.drawImage(image, -image.width / 2, -image.height / 2);
 
+  return canvas.toDataURL("image/jpeg", 0.92);
+}
+
+async function createHighContrastImage(dataUrl) {
+  const image = await loadImage(dataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imageData.data;
+
+  for (let index = 0; index < data.length; index += 4) {
+    const red = data[index];
+    const green = data[index + 1];
+    const blue = data[index + 2];
+    const gray = red * 0.299 + green * 0.587 + blue * 0.114;
+    const boosted = gray > 168 ? 255 : gray < 88 ? 0 : Math.min(255, Math.max(0, (gray - 88) * 3.2));
+    data[index] = boosted;
+    data[index + 1] = boosted;
+    data[index + 2] = boosted;
+  }
+
+  context.putImageData(imageData, 0, 0);
   return canvas.toDataURL("image/jpeg", 0.92);
 }
 

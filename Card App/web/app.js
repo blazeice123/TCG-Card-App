@@ -40,7 +40,7 @@ const moneyFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
 
-const APP_VERSION = "v0.3.2";
+const APP_VERSION = "v0.3.5";
 
 const LIKELY_SET_TERMS = new Set([
   "topps",
@@ -573,6 +573,12 @@ async function handleScan() {
         searchQuery: buildEbaySearchText(ocrResult.text),
         ocrText: ocrResult.text,
       });
+      const queryVariantDetails = buildSearchQueryVariantDetails({
+        manualSearch: buildEbaySearchText(ocrResult.text),
+        manualDetails: inferredDetails,
+        searchQuery: buildEbaySearchText(ocrResult.text),
+        ocrText: ocrResult.text,
+      });
       const searchQuery = queryVariants[0] || buildEbaySearchText(ocrResult.text);
       const lookupResult = await fetchCandidatesForCrop({
         searchQuery,
@@ -591,6 +597,7 @@ async function handleScan() {
           .join(" "),
         ocrText: ocrResult.text,
         ocrConfidence: ocrResult.confidence,
+        ocrRotation: ocrResult.rotation || 0,
         ocrError: ocrResult.error || "",
         matchCandidates: candidates,
         selectedCatalogCardId: candidates[0]?.catalogCardId || "",
@@ -601,6 +608,7 @@ async function handleScan() {
           searchReason: "scan",
           primaryQuery: searchQuery,
           queryVariants,
+          queryVariantDetails,
           lookupResult,
           ocrResult,
           manualDetails: inferredDetails,
@@ -732,6 +740,11 @@ async function handleReviewClick(event) {
 
   if (action === "copy-debug") {
     await copyCropDebugInfo(selected);
+    return;
+  }
+
+  if (action === "share-debug") {
+    await shareCropDebugInfo(selected);
     return;
   }
 
@@ -1236,6 +1249,7 @@ function renderDebugCard(crop) {
       <summary>Debug Info To Copy</summary>
       <pre class="debug-card__block">${escapeHtml(debugText)}</pre>
       <div class="button-row">
+        <button class="button" type="button" data-action="share-debug">Share Debug Info</button>
         <button class="button button--ghost" type="button" data-action="copy-debug">Copy Debug Info</button>
       </div>
     </details>
@@ -1549,16 +1563,22 @@ function buildManualSearchFromDetails(details) {
 
 function inferManualDetails(ocrText, searchQuery) {
   const normalizedSearch = normalizeText(searchQuery || ocrText);
-  const year = normalizedSearch.match(/\b(19|20)\d{2}\b/)?.[0] || "";
-  const cardNumber = pickLikelyCardNumber(ocrText || searchQuery, year);
-  const player = inferPlayerName(ocrText);
-  const brandSet = inferBrandSet(normalizedSearch, year, cardNumber, player);
+  const yearResult = inferYearFromText(normalizedSearch);
+  const cardNumberResult = pickLikelyCardNumber(ocrText || searchQuery, yearResult.value);
+  const playerResult = inferPlayerName(ocrText);
+  const brandSetResult = inferBrandSet(normalizedSearch, yearResult.value, cardNumberResult.value, playerResult.value);
 
   return {
-    player,
-    year,
-    brandSet,
-    cardNumber,
+    player: playerResult.value,
+    year: yearResult.value,
+    brandSet: brandSetResult.value,
+    cardNumber: cardNumberResult.value,
+    reasoning: {
+      player: playerResult.reason,
+      year: yearResult.reason,
+      brandSet: brandSetResult.reason,
+      cardNumber: cardNumberResult.reason,
+    },
   };
 }
 
@@ -1574,7 +1594,12 @@ function inferPlayerName(ocrText) {
     return words.length >= 2 && words.length <= 4 && words.every((word) => /^[A-Z][a-z'-]+$/.test(word));
   });
 
-  return likelyLine || "";
+  return {
+    value: likelyLine || "",
+    reason: likelyLine
+      ? `Used OCR line "${likelyLine}" because it looked the most like a player name.`
+      : "No strong player-name line was found in the OCR text.",
+  };
 }
 
 function inferBrandSet(normalizedSearch, year, cardNumber, player) {
@@ -1584,22 +1609,49 @@ function inferBrandSet(normalizedSearch, year, cardNumber, player) {
       .map((token) => String(token).toLowerCase()),
   );
 
-  return normalizedSearch
+  const keptTokens = normalizedSearch
     .split(" ")
     .filter((token) => token && !tokensToSkip.has(token) && LIKELY_SET_TERMS.has(token))
-    .slice(0, 3)
-    .join(" ")
-    .trim();
+    .slice(0, 3);
+
+  return {
+    value: keptTokens.join(" ").trim(),
+    reason: keptTokens.length
+      ? `Kept likely set words ${keptTokens.map((token) => `"${token}"`).join(", ")} after dropping player/year/card-number words.`
+      : "No strong brand/set words survived the cleanup rules.",
+  };
 }
 
 function pickLikelyCardNumber(sourceText, year) {
   const matches = extractCardNumbers(sourceText).filter((token) => token && token !== year);
   const nonYearMatch = matches.find((token) => !/^(19|20)\d{2}$/.test(token));
-  return nonYearMatch || matches[0] || "";
+  const chosen = nonYearMatch || matches[0] || "";
+
+  return {
+    value: chosen,
+    reason: chosen
+      ? `Picked "${chosen}" from the OCR number-like tokens ${matches.length ? matches.map((token) => `"${token}"`).join(", ") : "(none)"}.`
+      : "No believable card-number token was found in the OCR text.",
+  };
+}
+
+function inferYearFromText(normalizedSearch) {
+  const year = normalizedSearch.match(/\b(19|20)\d{2}\b/)?.[0] || "";
+  return {
+    value: year,
+    reason: year
+      ? `Matched the 4-digit year "${year}" in the cleaned OCR/search text.`
+      : "No 4-digit year pattern was found in the cleaned OCR/search text.",
+  };
 }
 
 function buildSearchQueryVariants(crop) {
+  return buildSearchQueryVariantDetails(crop).map((entry) => entry.query);
+}
+
+function buildSearchQueryVariantDetails(crop) {
   const details = getManualDetails(crop);
+  const inferred = inferManualDetails(crop?.ocrText || "", crop?.searchQuery || "");
   const player = String(details.player || "").trim();
   const year = String(details.year || "").trim();
   const brandSet = String(details.brandSet || "").trim();
@@ -1614,18 +1666,51 @@ function buildSearchQueryVariants(crop) {
       ? manualSearch
       : "";
 
-  return uniqueQueries([
-    customManualSearch,
-    buildManualSearchFromDetails(details),
-    savedSearch,
-    manualSearch,
-    [player, year, cardNumber].filter(Boolean).join(" "),
-    [player, brandSet, cardNumber].filter(Boolean).join(" "),
-    [player, year, brandSet].filter(Boolean).join(" "),
-    [player, cardNumber].filter(Boolean).join(" "),
-    [player, year].filter(Boolean).join(" "),
-    player,
-    ocrQuery,
+  return uniqueQueryEntries([
+    {
+      query: customManualSearch,
+      reason: "Used exactly what you typed into the Search eBay box because it was different from the saved OCR search.",
+    },
+    {
+      query: buildManualSearchFromDetails(details),
+      reason: `Built from the helper fields: player="${player}", year="${year}", brandSet="${brandSet}", cardNumber="${cardNumber}".`,
+    },
+    {
+      query: savedSearch,
+      reason: "Used the saved search text from the last scan pass.",
+    },
+    {
+      query: manualSearch,
+      reason: "Used the current Search eBay text box value.",
+    },
+    {
+      query: [player, year, cardNumber].filter(Boolean).join(" "),
+      reason: "Broadened to player + year + card number in case the set words were noisy.",
+    },
+    {
+      query: [player, brandSet, cardNumber].filter(Boolean).join(" "),
+      reason: "Tried player + brand/set + card number in case the year was wrong or missing.",
+    },
+    {
+      query: [player, year, brandSet].filter(Boolean).join(" "),
+      reason: "Tried player + year + brand/set in case the card number was wrong or missing.",
+    },
+    {
+      query: [player, cardNumber].filter(Boolean).join(" "),
+      reason: "Tried player + card number only as a looser fallback.",
+    },
+    {
+      query: [player, year].filter(Boolean).join(" "),
+      reason: "Tried player + year only as a broad fallback that should still find something.",
+    },
+    {
+      query: player,
+      reason: "Tried the player name by itself as the broadest useful fallback.",
+    },
+    {
+      query: ocrQuery,
+      reason: `Used the raw OCR cleanup query. Year reason: ${inferred.reasoning?.year || "-"} Brand/set reason: ${inferred.reasoning?.brandSet || "-"} Card number reason: ${inferred.reasoning?.cardNumber || "-"}`,
+    },
   ]);
 }
 
@@ -1640,6 +1725,25 @@ function uniqueQueries(queries) {
     .filter((query) => query.length >= 3)
     .filter((query) => {
       const normalized = query.toLowerCase();
+      if (seen.has(normalized)) {
+        return false;
+      }
+
+      seen.add(normalized);
+      return true;
+    });
+}
+
+function uniqueQueryEntries(entries) {
+  const seen = new Set();
+  return entries
+    .map((entry) => ({
+      query: String(entry?.query || "").replace(/\s+/g, " ").trim(),
+      reason: String(entry?.reason || "").trim(),
+    }))
+    .filter((entry) => entry.query.length >= 3)
+    .filter((entry) => {
+      const normalized = entry.query.toLowerCase();
       if (seen.has(normalized)) {
         return false;
       }
@@ -1742,10 +1846,12 @@ async function searchSelectedCropOnEbay(selected) {
       searchReason: "review",
       primaryQuery: query,
       queryVariants,
+      queryVariantDetails: buildSearchQueryVariantDetails(selected.crop),
       lookupResult,
       ocrResult: {
         text: selected.crop.ocrText || "",
         confidence: selected.crop.ocrConfidence,
+        rotation: selected.crop.ocrRotation || 0,
         error: selected.crop.ocrError || "",
       },
       manualDetails: getManualDetails(selected.crop),
@@ -1803,19 +1909,24 @@ function buildLookupAttempt(query, matchData, usedImage) {
   };
 }
 
-function buildLookupDebugInfo({ searchReason, primaryQuery, queryVariants, lookupResult, ocrResult, manualDetails, cropNote }) {
+function buildLookupDebugInfo({ searchReason, primaryQuery, queryVariants, queryVariantDetails, lookupResult, ocrResult, manualDetails, cropNote }) {
+  const inferred = inferManualDetails(ocrResult?.text || "", primaryQuery || "");
+
   return {
     version: APP_VERSION,
     searchedAt: new Date().toISOString(),
     searchReason,
     primaryQuery,
     queryVariants,
+    queryVariantDetails: queryVariantDetails || [],
     queryQueue: lookupResult?.queryQueue || [],
     attempts: lookupResult?.attempts || [],
     ocrText: ocrResult?.text || "",
     ocrConfidence: ocrResult?.confidence,
+    ocrRotation: ocrResult?.rotation || 0,
     ocrError: ocrResult?.error || "",
     manualDetails,
+    detailReasoning: inferred.reasoning || {},
     cropNote: cropNote || "",
     finalCandidateCount: lookupResult?.candidates?.length || 0,
     finalCandidates: (lookupResult?.candidates || []).slice(0, 5).map((candidate) => ({
@@ -1831,12 +1942,18 @@ function formatDebugInfo(crop) {
   const selectedCandidate = findSelectedCandidate(crop);
   const preferredQuery = getPreferredSearchText(crop);
   const liveSearchUrl = preferredQuery ? buildEbayLiveSearchUrl(preferredQuery) : "";
+  const detailReasoning = debug.detailReasoning || {};
   const attemptLines = (debug.attempts || []).length
     ? debug.attempts
         .map(
           (attempt, index) =>
             `${index + 1}. query="${attempt.query}" | image=${attempt.usedImage ? "yes" : "no"} | source=${attempt.source || "-"} | count=${attempt.candidateCount} | note=${attempt.note || "-"}${attempt.topTitles?.length ? ` | top=${attempt.topTitles.join(" || ")}` : ""}`,
         )
+        .join("\n")
+    : "none";
+  const queryReasonLines = (debug.queryVariantDetails || []).length
+    ? debug.queryVariantDetails
+        .map((entry, index) => `${index + 1}. "${entry.query}" -> ${entry.reason}`)
         .join("\n")
     : "none";
   const finalCandidateLines = (crop?.matchCandidates || []).length
@@ -1860,11 +1977,17 @@ function formatDebugInfo(crop) {
     `Selected match: ${selectedCandidate?.title || "-"}`,
     `Candidate count: ${crop?.matchCandidates?.length || 0}`,
     `OCR confidence: ${Number.isFinite(crop?.ocrConfidence) ? `${Math.round(crop.ocrConfidence * 100)}%` : "-"}`,
+    `OCR rotation used: ${debug.ocrRotation || crop?.ocrRotation || 0}`,
     `OCR error: ${crop?.ocrError || "-"}`,
     `OCR text: ${crop?.ocrText || "-"}`,
     `Crop note: ${crop?.note || debug.cropNote || "-"}`,
     `Manual details: player="${debug.manualDetails?.player || ""}" | year="${debug.manualDetails?.year || ""}" | brandSet="${debug.manualDetails?.brandSet || ""}" | cardNumber="${debug.manualDetails?.cardNumber || ""}"`,
+    `Why player: ${detailReasoning.player || "-"}`,
+    `Why year: ${detailReasoning.year || "-"}`,
+    `Why brand/set: ${detailReasoning.brandSet || "-"}`,
+    `Why card number: ${detailReasoning.cardNumber || "-"}`,
     `Open eBay URL: ${liveSearchUrl || "-"}`,
+    `Why these queries:\n${queryReasonLines}`,
     `Lookup attempts:\n${attemptLines}`,
     `Final candidates:\n${finalCandidateLines}`,
   ].join("\n");
@@ -1877,6 +2000,28 @@ async function copyCropDebugInfo(selected) {
     setStatus("Copied the debug info. Paste it here and I can dig in faster.");
   } catch (error) {
     setStatus("Could not copy automatically. You can still select the debug box text and paste it here.");
+  }
+}
+
+async function shareCropDebugInfo(selected) {
+  const debugText = formatDebugInfo(selected.crop);
+  if (!navigator.share) {
+    await copyCropDebugInfo(selected);
+    return;
+  }
+
+  try {
+    await navigator.share({
+      title: `Card Scanner Debug ${APP_VERSION}`,
+      text: debugText,
+    });
+    setStatus("Opened the share sheet for the debug info.");
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      return;
+    }
+
+    await copyCropDebugInfo(selected);
   }
 }
 
