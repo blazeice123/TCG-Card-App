@@ -24,6 +24,8 @@ import {
   loadImageFile,
   loadImageSource,
   runOcr,
+  waitForOpenCv,
+  waitForTesseract,
 } from "./scanner.js";
 import {
   createId,
@@ -40,7 +42,11 @@ const moneyFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
 
-const APP_VERSION = "v0.3.5";
+const APP_VERSION = "v0.3.6";
+const AUTO_LOOKUP_QUERY_LIMIT = 2;
+
+let backgroundCropQueue = Promise.resolve();
+let scannerWarmStarted = false;
 
 const LIKELY_SET_TERMS = new Set([
   "topps",
@@ -241,6 +247,7 @@ async function bootstrapEngines() {
 }
 
 function triggerImagePicker() {
+  warmUpScannerEngines();
   refs.imageInput.value = "";
   refs.imageInput.click();
 }
@@ -309,6 +316,7 @@ async function handleImageSelected(event) {
 }
 
 async function handleGenerateDemoImage() {
+  warmUpScannerEngines();
   const mode = state.appSettings.lastScanMode || "page";
   if (!state.catalogCards.length) {
     loadDemoCatalog();
@@ -331,6 +339,27 @@ async function handleGenerateDemoImage() {
       : "Sample photo is ready. Tap Find My Cards and we will split it up for you.",
   );
   render();
+}
+
+function warmUpScannerEngines() {
+  if (scannerWarmStarted) {
+    return;
+  }
+
+  scannerWarmStarted = true;
+  const startWarmup = () => {
+    Promise.allSettled([waitForOpenCv(), waitForTesseract()]).finally(() => {
+      refs.engineStatus.textContent = getEngineStatusText();
+      render();
+    });
+  };
+
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(startWarmup, { timeout: 900 });
+    return;
+  }
+
+  window.setTimeout(startWarmup, 0);
 }
 
 function applyLaunchPreset() {
@@ -524,6 +553,7 @@ async function handleScan() {
   refs.scanButton.textContent = "Working...";
 
   try {
+    warmUpScannerEngines();
     const mode = state.appSettings.lastScanMode || "page";
     setStatus("Getting your photo ready...");
     render();
@@ -553,96 +583,83 @@ async function handleScan() {
     setStatus(mode === "page" ? "Looking for cards in your photo..." : "Using single-card view...");
     render();
     const detectedCrops = await detectCropsFromImage(loaded.dataUrl, mode);
-    setStatus(`Found ${detectedCrops.length} ${detectedCrops.length === 1 ? "card" : "cards"}. Reading the details now...`);
-    render();
-
-    for (let index = 0; index < detectedCrops.length; index += 1) {
-      const detectedCrop = detectedCrops[index];
-      const ocrResult = await runOcr(detectedCrop.imageDataUrl).catch((error) => ({
-        text: "",
-        confidence: null,
-        error: error.message,
-        imageDataUrl: detectedCrop.imageDataUrl,
-        rotation: 0,
-      }));
-      const finalCropImageDataUrl = ocrResult.imageDataUrl || detectedCrop.imageDataUrl;
-      const inferredDetails = inferManualDetails(ocrResult.text, buildEbaySearchText(ocrResult.text));
-      const queryVariants = buildSearchQueryVariants({
-        manualSearch: buildEbaySearchText(ocrResult.text),
-        manualDetails: inferredDetails,
-        searchQuery: buildEbaySearchText(ocrResult.text),
-        ocrText: ocrResult.text,
-      });
-      const queryVariantDetails = buildSearchQueryVariantDetails({
-        manualSearch: buildEbaySearchText(ocrResult.text),
-        manualDetails: inferredDetails,
-        searchQuery: buildEbaySearchText(ocrResult.text),
-        ocrText: ocrResult.text,
-      });
-      const searchQuery = queryVariants[0] || buildEbaySearchText(ocrResult.text);
-      const lookupResult = await fetchCandidatesForCrop({
-        searchQuery,
-        imageDataUrl: finalCropImageDataUrl,
-        fallbackQueries: queryVariants.slice(1),
-      });
-      const candidates = lookupResult.candidates;
-
-      session.crops.push({
-        cropId: detectedCrop.cropId,
-        scannedAt: new Date().toISOString(),
-        imageDataUrl: finalCropImageDataUrl,
-        bounds: detectedCrop.bounds,
-        note: [detectedCrop.note, ocrResult.rotation ? "We straightened the card before reading it." : ""]
-          .filter(Boolean)
-          .join(" "),
-        ocrText: ocrResult.text,
-        ocrConfidence: ocrResult.confidence,
-        ocrRotation: ocrResult.rotation || 0,
-        ocrError: ocrResult.error || "",
-        matchCandidates: candidates,
-        selectedCatalogCardId: candidates[0]?.catalogCardId || "",
-        manualSearch: searchQuery,
-        manualDetails: inferredDetails,
-        searchQuery,
-        debugInfo: buildLookupDebugInfo({
-          searchReason: "scan",
-          primaryQuery: searchQuery,
-          queryVariants,
-          queryVariantDetails,
-          lookupResult,
-          ocrResult,
-          manualDetails: inferredDetails,
-          cropNote: [detectedCrop.note, ocrResult.rotation ? "We straightened the card before reading it." : ""]
-            .filter(Boolean)
-            .join(" "),
-        }),
-        reviewStatus: "pending",
-        unknownFlag: false,
-        pricing: null,
-        collectionCardId: "",
-      });
-
-      ui.selectedCropId = detectedCrop.cropId;
-      saveState(state);
-      render();
-      setStatus(
-        candidates.length
-          ? `Checked card ${index + 1} of ${detectedCrops.length}. eBay found ${candidates.length} likely card${candidates.length === 1 ? "" : "s"}.`
-          : `Checked card ${index + 1} of ${detectedCrops.length}. We did not get a clean eBay match yet.`,
-      );
-
-      if (index < detectedCrops.length - 1) {
-        await pauseForUi();
-      }
-    }
+    const scannedAtBase = Date.now();
+    session.crops = detectedCrops.map((detectedCrop, index) => ({
+      cropId: detectedCrop.cropId,
+      scannedAt: new Date(scannedAtBase + index).toISOString(),
+      imageDataUrl: detectedCrop.imageDataUrl,
+      bounds: detectedCrop.bounds,
+      note: detectedCrop.note || "",
+      ocrText: "",
+      ocrConfidence: null,
+      ocrRotation: 0,
+      ocrError: "",
+      matchCandidates: [],
+      selectedCatalogCardId: "",
+      manualSearch: "",
+      manualDetails: {
+        player: "",
+        year: "",
+        brandSet: "",
+        cardNumber: "",
+      },
+      searchQuery: "",
+      debugInfo: buildLookupDebugInfo({
+        searchReason: "scan",
+        primaryQuery: "",
+        queryVariants: [],
+        queryVariantDetails: [],
+        lookupResult: {
+          candidates: [],
+          attempts: [],
+          queryQueue: [],
+        },
+        ocrResult: {
+          text: "",
+          confidence: null,
+          rotation: 0,
+          error: "",
+        },
+        manualDetails: {
+          player: "",
+          year: "",
+          brandSet: "",
+          cardNumber: "",
+        },
+        cropNote: detectedCrop.note || "",
+        lookupState: "reading",
+        lookupMessage: "We are reading this card now.",
+        searchStyle: "Background prep",
+      }),
+      reviewStatus: "pending",
+      unknownFlag: false,
+      pricing: null,
+      collectionCardId: "",
+      lookupState: "reading",
+      lookupMessage: "We are reading this card now.",
+    }));
 
     session.status = "review";
+    ui.selectedCropId = session.crops[0]?.cropId || null;
     ui.pendingSourcePreview = null;
     ensureSelectedCrop();
     showScreen("review");
     saveState(state);
-    setStatus("Your cards are ready. Pick the closest eBay card, then we will show the sold range.");
+    setStatus(
+      detectedCrops.length === 1
+        ? "Your card is on screen. We are reading it now, then we will look for close eBay cards."
+        : `Found ${detectedCrops.length} cards. You can start reviewing while we keep reading and searching in the background.`,
+    );
     render();
+
+    detectedCrops.forEach((detectedCrop, index) => {
+      queueBackgroundCropAnalysis({
+        cropId: detectedCrop.cropId,
+        detectedCrop,
+        cropIndex: index,
+        totalCrops: detectedCrops.length,
+      });
+    });
   } catch (error) {
     setStatus(`That photo did not work. ${error.message}`);
   } finally {
@@ -651,6 +668,110 @@ async function handleScan() {
     refs.scanButton.textContent = "Find My Cards";
     render();
   }
+}
+
+function queueBackgroundCropAnalysis(task) {
+  backgroundCropQueue = backgroundCropQueue
+    .then(() => processDetectedCrop(task))
+    .catch((error) => {
+      console.warn("Background card work failed.", error);
+    });
+
+  return backgroundCropQueue;
+}
+
+async function processDetectedCrop({ cropId, detectedCrop, cropIndex, totalCrops }) {
+  const startingEntry = findCropEntryById(cropId);
+  if (!startingEntry) {
+    return;
+  }
+
+  const ocrResult = await runOcr(detectedCrop.imageDataUrl).catch((error) => ({
+    text: "",
+    confidence: null,
+    error: error.message,
+    imageDataUrl: detectedCrop.imageDataUrl,
+    rotation: 0,
+  }));
+
+  const selected = findCropEntryById(cropId);
+  if (!selected) {
+    return;
+  }
+
+  const crop = selected.crop;
+  const finalCropImageDataUrl = ocrResult.imageDataUrl || detectedCrop.imageDataUrl;
+  const inferredDetails = inferManualDetails(ocrResult.text, buildEbaySearchText(ocrResult.text));
+  const mergedManualDetails = mergeManualDetails(crop.manualDetails, inferredDetails);
+  const cropNote = [detectedCrop.note, ocrResult.rotation ? "We straightened the card before reading it." : ""]
+    .filter(Boolean)
+    .join(" ");
+  const defaultSearch = buildManualSearchFromDetails(mergedManualDetails) || buildEbaySearchText(ocrResult.text);
+
+  crop.imageDataUrl = finalCropImageDataUrl;
+  crop.note = cropNote;
+  crop.ocrText = ocrResult.text;
+  crop.ocrConfidence = ocrResult.confidence;
+  crop.ocrRotation = ocrResult.rotation || 0;
+  crop.ocrError = ocrResult.error || "";
+  crop.manualDetails = mergedManualDetails;
+  crop.searchQuery = crop.searchQuery || defaultSearch;
+  crop.manualSearch = crop.manualSearch || crop.searchQuery;
+
+  const queryVariantDetails = buildSearchQueryVariantDetails(crop);
+  const automaticQueryDetails = pickAutomaticLookupQueries(crop, queryVariantDetails);
+  const automaticQueries = automaticQueryDetails.map((entry) => entry.query);
+  const automaticPrimaryQuery = automaticQueries[0] || "";
+  const skipReason = automaticQueryDetails.length ? "" : explainAutomaticLookupSkip(crop);
+
+  crop.searchQuery = crop.searchQuery || automaticPrimaryQuery || defaultSearch;
+  crop.manualSearch = crop.manualSearch || crop.searchQuery;
+  crop.lookupState = automaticPrimaryQuery ? "loading" : "idle";
+  crop.lookupMessage = automaticPrimaryQuery
+    ? "We are checking eBay now."
+    : skipReason || "Add player, year, set, or card number, then tap Search eBay.";
+  crop.debugInfo = buildLookupDebugInfo({
+    searchReason: "scan",
+    primaryQuery: automaticPrimaryQuery,
+    queryVariants: automaticQueries,
+    queryVariantDetails: automaticQueryDetails,
+    lookupResult: {
+      candidates: crop.matchCandidates || [],
+      attempts: [],
+      queryQueue: automaticQueries,
+    },
+    ocrResult,
+    manualDetails: mergedManualDetails,
+    cropNote,
+    lookupState: crop.lookupState,
+    lookupMessage: crop.lookupMessage,
+    searchStyle: automaticPrimaryQuery ? "Fast background text search" : "Waiting for a better search hint",
+  });
+  saveState(state);
+  render();
+
+  if (!automaticPrimaryQuery) {
+    setStatus(
+      totalCrops === 1
+        ? "We read the card, but the search words are still too rough. Add a player, year, set, or card number and tap Search eBay."
+        : `Card ${cropIndex + 1} is ready. Add a player, year, set, or card number if you want a stronger search.`,
+    );
+    return;
+  }
+
+  setStatus(
+    totalCrops === 1
+      ? "We read the card. Checking eBay now..."
+      : `Card ${cropIndex + 1} of ${totalCrops} is ready. Checking eBay now...`,
+  );
+
+  await runCropLookup({
+    cropId,
+    searchReason: "scan",
+    queryVariantDetails: automaticQueryDetails,
+    imageDataUrl: "",
+    searchStyle: "Fast background text search",
+  });
 }
 
 function handleCropSelection(event) {
@@ -1067,12 +1188,18 @@ function renderCropCard(crop, session, showScanInfo) {
     ? state.collectionCards.find((entry) => entry.collectionCardId === crop.collectionCardId)
     : null;
   const latestPrice = collectionCard ? findLatestSnapshot(collectionCard) : null;
+  const placeholderTitle =
+    crop.lookupState === "reading"
+      ? "Reading card..."
+      : crop.lookupState === "loading"
+        ? "Looking on eBay..."
+        : "Unknown card";
 
   return `
     <button type="button" class="recent-card" data-crop-id="${crop.cropId}">
       <img src="${crop.imageDataUrl}" alt="Card preview" loading="lazy" decoding="async" />
       <div class="recent-card__meta">
-        <span class="recent-card__title">${escapeHtml(candidatePrimaryText(matchedCard) || "Unknown card")}</span>
+        <span class="recent-card__title">${escapeHtml(candidatePrimaryText(matchedCard) || placeholderTitle)}</span>
         <span class="recent-card__sub">${escapeHtml(
           matchedCard
             ? candidateDetailText(matchedCard)
@@ -1082,7 +1209,7 @@ function renderCropCard(crop, session, showScanInfo) {
         ${
           showScanInfo
             ? `<span class="micro-copy">${escapeHtml(
-                session?.mode === "single" ? "Single-card view" : humanReviewStatus(crop.reviewStatus),
+                session?.mode === "single" ? "Single-card view" : humanReviewStatusForCrop(crop),
               )}</span>`
             : ""
         }
@@ -1135,21 +1262,17 @@ function renderReviewPane(allCrops) {
           (entry) => `
             <button type="button" class="review-crop-pill ${entry.crop.cropId === selected.crop.cropId ? "review-crop-pill--selected" : ""}" data-crop-id="${entry.crop.cropId}">
               <img src="${entry.crop.imageDataUrl}" alt="Card to review" loading="lazy" decoding="async" />
-              <span class="review-crop-pill__status">${escapeHtml(humanReviewStatus(entry.crop.reviewStatus))}</span>
+              <span class="review-crop-pill__status">${escapeHtml(humanReviewStatusForCrop(entry.crop))}</span>
             </button>
           `,
         )
         .join("")}
     </div>
-    <div class="review-focus">
-      <div class="badge-row">
-        <span class="badge badge--${humanReviewBadgeClass(selected.crop.reviewStatus)}">${escapeHtml(humanReviewStatus(selected.crop.reviewStatus))}</span>
-        ${
-          selected.crop.matchCandidates[0]
-            ? `<span class="badge badge--pending">${Math.round(selected.crop.matchCandidates[0].confidenceScore * 100)}% sure</span>`
-            : ""
-        }
-      </div>
+      <div class="review-focus">
+        <div class="badge-row">
+          <span class="badge badge--${humanReviewBadgeClass(selected.crop.reviewStatus)}">${escapeHtml(humanReviewStatus(selected.crop.reviewStatus))}</span>
+          ${renderLookupBadge(selected.crop)}
+        </div>
       <label class="input-group">
         <span>Search eBay</span>
         <input type="search" name="manualSearch" value="${escapeAttribute(searchPreview)}" placeholder="Player, year, set, or card number" />
@@ -1216,12 +1339,7 @@ function renderReviewPane(allCrops) {
                     `,
                   )
                   .join("")
-              : `
-                  <div class="review-note review-note--warning">
-                    <strong>No eBay card yet</strong>
-                    <div class="small-copy">The little picture above is your scan, not a match. Try the player name, year, set, or card number above.</div>
-                  </div>
-                `
+              : renderLookupStateCard(selected.crop)
           }
         </div>
       </div>
@@ -1240,6 +1358,68 @@ function renderReviewPane(allCrops) {
       ${renderPricingBox(selected.crop, currentCard)}
     </div>
   `;
+}
+
+function renderLookupBadge(crop) {
+  if (crop?.matchCandidates?.[0]) {
+    return `<span class="badge badge--pending">${Math.round(crop.matchCandidates[0].confidenceScore * 100)}% sure</span>`;
+  }
+
+  switch (crop?.lookupState) {
+    case "reading":
+      return '<span class="badge badge--pending">Reading...</span>';
+    case "loading":
+      return '<span class="badge badge--pending">Searching eBay...</span>';
+    case "empty":
+      return '<span class="badge badge--pending">No match yet</span>';
+    case "error":
+      return '<span class="badge badge--pending">Search snag</span>';
+    default:
+      return "";
+  }
+}
+
+function renderLookupStateCard(crop) {
+  const lookupMessage = escapeHtml(crop?.lookupMessage || "Try the player name, year, set, or card number above.");
+
+  switch (crop?.lookupState) {
+    case "reading":
+      return `
+        <div class="review-note">
+          <strong>Reading the card</strong>
+          <div class="small-copy">${lookupMessage}</div>
+        </div>
+      `;
+    case "loading":
+      return `
+        <div class="review-note">
+          <strong>Looking on eBay</strong>
+          <div class="small-copy">${lookupMessage}</div>
+        </div>
+      `;
+    case "idle":
+      return `
+        <div class="review-note">
+          <strong>Need a better hint</strong>
+          <div class="small-copy">${lookupMessage}</div>
+        </div>
+      `;
+    case "error":
+      return `
+        <div class="review-note review-note--warning">
+          <strong>Search hit a snag</strong>
+          <div class="small-copy">${lookupMessage}</div>
+        </div>
+      `;
+    case "empty":
+    default:
+      return `
+        <div class="review-note review-note--warning">
+          <strong>No eBay card yet</strong>
+          <div class="small-copy">${lookupMessage || "The little picture above is your scan, not a match. Try the player name, year, set, or card number above."}</div>
+        </div>
+      `;
+  }
 }
 
 function renderDebugCard(crop) {
@@ -1413,6 +1593,20 @@ function getSelectedCrop() {
   return found || allCrops[0] || null;
 }
 
+function findCropEntryById(cropId) {
+  for (const session of state.scanSessions) {
+    const crop = session.crops.find((entry) => entry.cropId === cropId);
+    if (crop) {
+      return {
+        session,
+        crop,
+      };
+    }
+  }
+
+  return null;
+}
+
 function getAllCropsSorted() {
   return state.scanSessions
     .flatMap((session) =>
@@ -1488,6 +1682,14 @@ function resolveCropValueText(crop, latestPrice) {
     return "Save for later";
   }
 
+  if (crop.lookupState === "reading") {
+    return "Reading";
+  }
+
+  if (crop.lookupState === "loading") {
+    return "Searching";
+  }
+
   return "Take a look";
 }
 
@@ -1536,6 +1738,15 @@ function getManualDetails(crop) {
     year: crop?.manualDetails?.year || inferred.year,
     brandSet: crop?.manualDetails?.brandSet || inferred.brandSet,
     cardNumber: crop?.manualDetails?.cardNumber || inferred.cardNumber,
+  };
+}
+
+function mergeManualDetails(currentDetails, inferredDetails) {
+  return {
+    player: String(currentDetails?.player || inferredDetails?.player || "").trim(),
+    year: String(currentDetails?.year || inferredDetails?.year || "").trim(),
+    brandSet: String(currentDetails?.brandSet || inferredDetails?.brandSet || "").trim(),
+    cardNumber: String(currentDetails?.cardNumber || inferredDetails?.cardNumber || "").trim(),
   };
 }
 
@@ -1718,6 +1929,44 @@ function getPreferredSearchText(crop) {
   return buildSearchQueryVariants(crop)[0] || String(crop?.manualSearch || crop?.searchQuery || "").trim();
 }
 
+function pickAutomaticLookupQueries(crop, queryVariantDetails = buildSearchQueryVariantDetails(crop)) {
+  const details = getManualDetails(crop);
+  const hasHelpfulDetails = hasManualDetails(details);
+  const messyRead = looksLikeMessyRead(crop?.ocrText || "", crop?.ocrConfidence);
+  const rawOcrQuery = buildEbaySearchText(crop?.ocrText || "").toLowerCase();
+
+  if (messyRead && !hasHelpfulDetails) {
+    return [];
+  }
+
+  return queryVariantDetails
+    .filter((entry) => {
+      if (!entry?.query) {
+        return false;
+      }
+
+      if (!hasHelpfulDetails && messyRead && entry.query.toLowerCase() === rawOcrQuery) {
+        return false;
+      }
+
+      return true;
+    })
+    .slice(0, AUTO_LOOKUP_QUERY_LIMIT);
+}
+
+function explainAutomaticLookupSkip(crop) {
+  const details = getManualDetails(crop);
+  if (!String(crop?.ocrText || "").trim()) {
+    return "We could not read enough yet. Add player, year, set, or card number, then tap Search eBay.";
+  }
+
+  if (looksLikeMessyRead(crop?.ocrText || "", crop?.ocrConfidence) && !hasManualDetails(details)) {
+    return "The read came through too rough for a smart auto-search. Add player, year, set, or card number, then tap Search eBay.";
+  }
+
+  return "Add player, year, set, or card number, then tap Search eBay.";
+}
+
 function uniqueQueries(queries) {
   const seen = new Set();
   return queries
@@ -1761,9 +2010,14 @@ function findSelectedCandidate(crop) {
   return crop.matchCandidates.find((candidate) => candidate.catalogCardId === crop.selectedCatalogCardId) || null;
 }
 
-async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueries = [] } = {}) {
-  const queryQueue = uniqueQueries([searchQuery, ...fallbackQueries]);
-  if (!queryQueue.length && !imageDataUrl) {
+async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueries = [], useImage = Boolean(imageDataUrl), maxQueries = null } = {}) {
+  let queryQueue = uniqueQueries([searchQuery, ...fallbackQueries]);
+  if (Number.isFinite(maxQueries) && maxQueries > 0) {
+    queryQueue = queryQueue.slice(0, maxQueries);
+  }
+
+  const imageLookupDataUrl = useImage ? imageDataUrl : "";
+  if (!queryQueue.length && !imageLookupDataUrl) {
     return {
       candidates: [],
       attempts: [],
@@ -1775,10 +2029,10 @@ async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueri
   const seen = new Set();
   const attempts = [];
 
-  if (!queryQueue.length && imageDataUrl) {
+  if (!queryQueue.length && imageLookupDataUrl) {
     const matchData = await fetchEbayMatches({
       searchQuery: "",
-      imageDataUrl,
+      imageDataUrl: imageLookupDataUrl,
       limit: 6,
     });
     attempts.push(buildLookupAttempt("", matchData, true));
@@ -1793,10 +2047,10 @@ async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueri
     const query = queryQueue[index];
     const matchData = await fetchEbayMatches({
       searchQuery: query,
-      imageDataUrl: index === 0 ? imageDataUrl : "",
+      imageDataUrl: index === 0 ? imageLookupDataUrl : "",
       limit: 6,
     });
-    attempts.push(buildLookupAttempt(query, matchData, index === 0 && Boolean(imageDataUrl)));
+    attempts.push(buildLookupAttempt(query, matchData, index === 0 && Boolean(imageLookupDataUrl)));
 
     (matchData.candidates || []).forEach((candidate) => {
       const key = candidate.itemWebUrl || candidate.catalogCardId || candidate.title;
@@ -1823,6 +2077,7 @@ async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueri
 async function searchSelectedCropOnEbay(selected) {
   const queryVariants = buildSearchQueryVariants(selected.crop);
   const query = String(queryVariants[0] || "").trim();
+  const useImageLookup = !query;
   if (!query && !selected.crop.imageDataUrl) {
     setStatus("Give eBay a few words first, like player, year, set, or card number.");
     return;
@@ -1830,43 +2085,133 @@ async function searchSelectedCropOnEbay(selected) {
 
   selected.crop.manualSearch = query;
   selected.crop.searchQuery = query;
-  setStatus(query ? `Searching eBay for "${query}"...` : "Searching eBay from the card photo...");
+  selected.crop.lookupState = "loading";
+  selected.crop.lookupMessage = query ? `Searching eBay for "${query}"...` : "Searching eBay from the card photo...";
+  selected.crop.debugInfo = buildLookupDebugInfo({
+    searchReason: "review",
+    primaryQuery: query,
+    queryVariants,
+    queryVariantDetails: buildSearchQueryVariantDetails(selected.crop),
+    lookupResult: {
+      candidates: selected.crop.matchCandidates || [],
+      attempts: [],
+      queryQueue: queryVariants,
+    },
+    ocrResult: {
+      text: selected.crop.ocrText || "",
+      confidence: selected.crop.ocrConfidence,
+      rotation: selected.crop.ocrRotation || 0,
+      error: selected.crop.ocrError || "",
+    },
+    manualDetails: getManualDetails(selected.crop),
+    cropNote: selected.crop.note || "",
+    lookupState: selected.crop.lookupState,
+    lookupMessage: selected.crop.lookupMessage,
+    searchStyle: useImageLookup ? "Manual photo search" : "Manual text search",
+  });
+  saveState(state);
+  setStatus(selected.crop.lookupMessage);
   render();
+
+  await runCropLookup({
+    cropId: selected.crop.cropId,
+    searchReason: "review",
+    queryVariantDetails: buildSearchQueryVariantDetails(selected.crop),
+    imageDataUrl: useImageLookup ? selected.crop.imageDataUrl : "",
+    searchStyle: useImageLookup ? "Manual photo search" : "Manual text search",
+  });
+}
+
+async function runCropLookup({ cropId, searchReason, queryVariantDetails, imageDataUrl = "", searchStyle = "Text search" }) {
+  const selected = findCropEntryById(cropId);
+  if (!selected) {
+    return;
+  }
+
+  const crop = selected.crop;
+  const queryVariants = (queryVariantDetails || []).map((entry) => entry.query);
+  const primaryQuery = String(queryVariants[0] || "").trim();
+  const useImageLookup = Boolean(imageDataUrl) && !primaryQuery;
 
   try {
     const lookupResult = await fetchCandidatesForCrop({
-      searchQuery: query,
-      imageDataUrl: selected.crop.imageDataUrl,
+      searchQuery: primaryQuery,
+      imageDataUrl,
       fallbackQueries: queryVariants.slice(1),
+      useImage: useImageLookup,
+      maxQueries: searchReason === "scan" ? AUTO_LOOKUP_QUERY_LIMIT : null,
     });
+    const refreshed = findCropEntryById(cropId);
+    if (!refreshed) {
+      return;
+    }
+
+    const refreshedCrop = refreshed.crop;
     const candidates = lookupResult.candidates;
-    selected.crop.matchCandidates = candidates;
-    selected.crop.selectedCatalogCardId = candidates[0]?.catalogCardId || "";
-    selected.crop.debugInfo = buildLookupDebugInfo({
-      searchReason: "review",
-      primaryQuery: query,
+    refreshedCrop.matchCandidates = candidates;
+    refreshedCrop.selectedCatalogCardId = candidates[0]?.catalogCardId || "";
+    refreshedCrop.lookupState = candidates.length ? "done" : "empty";
+    refreshedCrop.lookupMessage = candidates.length
+      ? `Found ${candidates.length} likely eBay card${candidates.length === 1 ? "" : "s"}.`
+      : primaryQuery
+        ? `Nothing close showed up on eBay for "${primaryQuery}" yet.`
+        : "Nothing close showed up from the card photo yet.";
+    refreshedCrop.debugInfo = buildLookupDebugInfo({
+      searchReason,
+      primaryQuery,
       queryVariants,
-      queryVariantDetails: buildSearchQueryVariantDetails(selected.crop),
+      queryVariantDetails,
       lookupResult,
       ocrResult: {
-        text: selected.crop.ocrText || "",
-        confidence: selected.crop.ocrConfidence,
-        rotation: selected.crop.ocrRotation || 0,
-        error: selected.crop.ocrError || "",
+        text: refreshedCrop.ocrText || "",
+        confidence: refreshedCrop.ocrConfidence,
+        rotation: refreshedCrop.ocrRotation || 0,
+        error: refreshedCrop.ocrError || "",
       },
-      manualDetails: getManualDetails(selected.crop),
-      cropNote: selected.crop.note || "",
+      manualDetails: getManualDetails(refreshedCrop),
+      cropNote: refreshedCrop.note || "",
+      lookupState: refreshedCrop.lookupState,
+      lookupMessage: refreshedCrop.lookupMessage,
+      searchStyle,
     });
     saveState(state);
     setStatus(
       candidates.length
-        ? `eBay found ${candidates.length} likely card${candidates.length === 1 ? "" : "s"}${query ? ` for "${query}"` : ""}.`
-        : query
-          ? `Nothing close showed up on eBay for "${query}" yet.`
-          : "Nothing close showed up on eBay from the photo yet.",
+        ? `eBay found ${candidates.length} likely card${candidates.length === 1 ? "" : "s"}${primaryQuery ? ` for "${primaryQuery}"` : ""}.`
+        : refreshedCrop.lookupMessage,
     );
     render();
   } catch (error) {
+    const refreshed = findCropEntryById(cropId);
+    if (!refreshed) {
+      return;
+    }
+
+    refreshed.crop.lookupState = "error";
+    refreshed.crop.lookupMessage = error.message;
+    refreshed.crop.debugInfo = buildLookupDebugInfo({
+      searchReason,
+      primaryQuery,
+      queryVariants,
+      queryVariantDetails,
+      lookupResult: {
+        candidates: refreshed.crop.matchCandidates || [],
+        attempts: [],
+        queryQueue: queryVariants,
+      },
+      ocrResult: {
+        text: refreshed.crop.ocrText || "",
+        confidence: refreshed.crop.ocrConfidence,
+        rotation: refreshed.crop.ocrRotation || 0,
+        error: refreshed.crop.ocrError || "",
+      },
+      manualDetails: getManualDetails(refreshed.crop),
+      cropNote: refreshed.crop.note || "",
+      lookupState: refreshed.crop.lookupState,
+      lookupMessage: refreshed.crop.lookupMessage,
+      searchStyle,
+    });
+    saveState(state);
     setStatus(`eBay search hit a snag. ${error.message}`);
     render();
   }
@@ -1909,13 +2254,26 @@ function buildLookupAttempt(query, matchData, usedImage) {
   };
 }
 
-function buildLookupDebugInfo({ searchReason, primaryQuery, queryVariants, queryVariantDetails, lookupResult, ocrResult, manualDetails, cropNote }) {
+function buildLookupDebugInfo({
+  searchReason,
+  primaryQuery,
+  queryVariants,
+  queryVariantDetails,
+  lookupResult,
+  ocrResult,
+  manualDetails,
+  cropNote,
+  lookupState = "",
+  lookupMessage = "",
+  searchStyle = "",
+}) {
   const inferred = inferManualDetails(ocrResult?.text || "", primaryQuery || "");
 
   return {
     version: APP_VERSION,
     searchedAt: new Date().toISOString(),
     searchReason,
+    searchStyle,
     primaryQuery,
     queryVariants,
     queryVariantDetails: queryVariantDetails || [],
@@ -1928,6 +2286,8 @@ function buildLookupDebugInfo({ searchReason, primaryQuery, queryVariants, query
     manualDetails,
     detailReasoning: inferred.reasoning || {},
     cropNote: cropNote || "",
+    lookupState,
+    lookupMessage,
     finalCandidateCount: lookupResult?.candidates?.length || 0,
     finalCandidates: (lookupResult?.candidates || []).slice(0, 5).map((candidate) => ({
       title: candidate.title || candidate.playerName || "",
@@ -1971,9 +2331,12 @@ function formatDebugInfo(crop) {
     `When copied: ${new Date().toISOString()}`,
     `Last search run: ${debug.searchedAt || "-"}`,
     `Search reason: ${debug.searchReason || "-"}`,
+    `Search style: ${debug.searchStyle || "-"}`,
     `Preferred search text: ${preferredQuery || "-"}`,
     `Primary query used: ${debug.primaryQuery || "-"}`,
     `Query variants: ${(debug.queryVariants || []).join(" | ") || "-"}`,
+    `Lookup state: ${crop?.lookupState || debug.lookupState || "-"}`,
+    `Lookup note: ${crop?.lookupMessage || debug.lookupMessage || "-"}`,
     `Selected match: ${selectedCandidate?.title || "-"}`,
     `Candidate count: ${crop?.matchCandidates?.length || 0}`,
     `OCR confidence: ${Number.isFinite(crop?.ocrConfidence) ? `${Math.round(crop.ocrConfidence * 100)}%` : "-"}`,
@@ -2087,7 +2450,29 @@ function humanReviewStatus(status) {
   }
 }
 
+function humanReviewStatusForCrop(crop) {
+  if (!crop) {
+    return "Take a look";
+  }
+
+  if (crop.reviewStatus === "pending") {
+    if (crop.lookupState === "reading") {
+      return "Reading";
+    }
+
+    if (crop.lookupState === "loading") {
+      return "Searching";
+    }
+  }
+
+  return humanReviewStatus(crop.reviewStatus);
+}
+
 function describeReadText(crop) {
+  if (crop.lookupState === "reading") {
+    return "We are still reading this card. Once that is done, we will tighten the search.";
+  }
+
   if (crop.ocrError) {
     return "We had a hard time reading this one. That is okay. Pick the right card below.";
   }
