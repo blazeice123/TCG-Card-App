@@ -16,8 +16,42 @@ const QUERY_STOP_WORDS = new Set([
   "football",
   "front",
   "back",
-  "topps",
 ]);
+
+const KNOWN_CARD_BRANDS = new Set([
+  "topps",
+  "bowman",
+  "donruss",
+  "fleer",
+  "score",
+  "upper",
+  "deck",
+  "upperdeck",
+  "leaf",
+  "stadium",
+  "club",
+  "panini",
+  "prizm",
+  "hoops",
+  "optic",
+  "finest",
+  "chrome",
+  "heritage",
+  "select",
+  "mosaic",
+  "contenders",
+  "pinnacle",
+]);
+
+export function buildEbayLiveSearchUrl(searchInput) {
+  const query = resolveSearchQuery(searchInput);
+  const params = new URLSearchParams({
+    _nkw: query,
+    rt: "nc",
+  });
+
+  return `https://www.ebay.com/sch/i.html?${params.toString()}`;
+}
 
 export function buildSoldSearchUrl(searchInput) {
   const query = resolveSearchQuery(searchInput);
@@ -112,9 +146,10 @@ export function buildEbaySearchText(readText) {
   yearTokens.slice(0, 1).forEach((token) => pushUnique(keptTokens, token));
 
   rawTokens.forEach((token) => {
+    const isKnownBrand = KNOWN_CARD_BRANDS.has(token);
     if (
-      token.length < 3 ||
-      QUERY_STOP_WORDS.has(token) ||
+      (token.length < 3 && !isKnownBrand) ||
+      (QUERY_STOP_WORDS.has(token) && !isKnownBrand) ||
       /^(19|20)\d{2}$/.test(token) ||
       /^[a-z]*\d+[a-z]*$/.test(token)
     ) {

@@ -1,5 +1,7 @@
 import {
   buildSearchQuery,
+  extractCardNumbers,
+  normalizeText,
   parseCatalogCsv,
   summarizeCatalog,
 } from "./catalog.js";
@@ -11,6 +13,7 @@ import {
 } from "./demo-data.js";
 import {
   buildEbaySearchText,
+  buildEbayLiveSearchUrl,
   fetchEbayMatches,
   buildSoldSearchUrl,
   fetchPriceEstimate,
@@ -445,6 +448,10 @@ async function seedDemoResults() {
       ],
       selectedCatalogCardId: card.catalogCardId,
       manualSearch: buildSearchQuery(card),
+      manualDetails: inferManualDetails(
+        `${card.year} ${card.brand} ${card.setName} ${card.playerName} ${card.cardNumber}`,
+        buildSearchQuery(card),
+      ),
       searchQuery: buildSearchQuery(card),
       reviewStatus: confirmed ? "confirmed" : "pending",
       unknownFlag: false,
@@ -523,25 +530,31 @@ async function handleScan() {
         text: "",
         confidence: null,
         error: error.message,
+        imageDataUrl: detectedCrop.imageDataUrl,
+        rotation: 0,
       }));
+      const finalCropImageDataUrl = ocrResult.imageDataUrl || detectedCrop.imageDataUrl;
       const searchQuery = buildEbaySearchText(ocrResult.text);
       const candidates = await fetchCandidatesForCrop({
         searchQuery,
-        imageDataUrl: detectedCrop.imageDataUrl,
+        imageDataUrl: finalCropImageDataUrl,
       });
 
       session.crops.push({
         cropId: detectedCrop.cropId,
         scannedAt: new Date().toISOString(),
-        imageDataUrl: detectedCrop.imageDataUrl,
+        imageDataUrl: finalCropImageDataUrl,
         bounds: detectedCrop.bounds,
-        note: detectedCrop.note,
+        note: [detectedCrop.note, ocrResult.rotation ? "We straightened the card before reading it." : ""]
+          .filter(Boolean)
+          .join(" "),
         ocrText: ocrResult.text,
         ocrConfidence: ocrResult.confidence,
         ocrError: ocrResult.error || "",
         matchCandidates: candidates,
         selectedCatalogCardId: candidates[0]?.catalogCardId || "",
         manualSearch: searchQuery,
+        manualDetails: inferManualDetails(ocrResult.text, searchQuery),
         searchQuery,
         reviewStatus: "pending",
         unknownFlag: false,
@@ -608,6 +621,27 @@ function handleReviewChange(event) {
     selected.crop.manualSearch = event.target.value;
     saveState(state);
     render();
+    return;
+  }
+
+  if (event.target.name === "detailPlayer" || event.target.name === "detailYear" || event.target.name === "detailSet" || event.target.name === "detailNumber") {
+    const details = getManualDetails(selected.crop);
+    if (event.target.name === "detailPlayer") {
+      details.player = event.target.value;
+    }
+    if (event.target.name === "detailYear") {
+      details.year = event.target.value;
+    }
+    if (event.target.name === "detailSet") {
+      details.brandSet = event.target.value;
+    }
+    if (event.target.name === "detailNumber") {
+      details.cardNumber = event.target.value;
+    }
+
+    selected.crop.manualDetails = details;
+    saveState(state);
+    render();
   }
 }
 
@@ -636,6 +670,11 @@ async function handleReviewClick(event) {
 
   if (action === "search-ebay") {
     await searchSelectedCropOnEbay(selected);
+    return;
+  }
+
+  if (action === "open-ebay") {
+    openSelectedCropOnEbay(selected);
     return;
   }
 
@@ -1014,8 +1053,11 @@ function renderReviewPane(allCrops) {
   }
 
   const currentCard = findSelectedCandidate(selected.crop);
+  const manualDetails = getManualDetails(selected.crop);
+  const searchPreview = buildManualSearchFromDetails(manualDetails) || selected.crop.manualSearch || selected.crop.searchQuery || "";
 
   return `
+    <div class="review-label">Cards from your photo</div>
     <div class="review-queue">
       ${allCrops
         .map(
@@ -1029,9 +1071,6 @@ function renderReviewPane(allCrops) {
         .join("")}
     </div>
     <div class="review-focus">
-      <div class="review-focus__image">
-        <img src="${selected.crop.imageDataUrl}" alt="Selected card" decoding="async" />
-      </div>
       <div class="badge-row">
         <span class="badge badge--${humanReviewBadgeClass(selected.crop.reviewStatus)}">${escapeHtml(humanReviewStatus(selected.crop.reviewStatus))}</span>
         ${
@@ -1040,17 +1079,40 @@ function renderReviewPane(allCrops) {
             : ""
         }
       </div>
-      <div class="review-note">
-        <strong>What the photo picked up</strong>
-        <div class="small-copy">${escapeHtml(describeReadText(selected.crop))}</div>
-      </div>
       <label class="input-group">
         <span>Search eBay</span>
         <input type="search" name="manualSearch" value="${escapeAttribute(selected.crop.manualSearch || "")}" placeholder="Player, year, set, or card number" />
       </label>
       <div class="small-copy">Tip: leave this blank if you want us to lean on the card photo first.</div>
+      <div class="review-note">
+        <strong>Help us narrow it down</strong>
+        <div class="detail-grid">
+          <label class="input-group">
+            <span>Player</span>
+            <input type="search" name="detailPlayer" value="${escapeAttribute(manualDetails.player || "")}" placeholder="Fred McGriff" />
+          </label>
+          <label class="input-group">
+            <span>Year</span>
+            <input type="search" name="detailYear" value="${escapeAttribute(manualDetails.year || "")}" placeholder="1988" />
+          </label>
+          <label class="input-group detail-grid__wide">
+            <span>Brand or set</span>
+            <input type="search" name="detailSet" value="${escapeAttribute(manualDetails.brandSet || "")}" placeholder="Topps Traded or Donruss" />
+          </label>
+          <label class="input-group">
+            <span>Card number</span>
+            <input type="search" name="detailNumber" value="${escapeAttribute(manualDetails.cardNumber || "")}" placeholder="74T or 123" />
+          </label>
+        </div>
+        <div class="small-copy">${
+          searchPreview
+            ? `We would search eBay with: ${escapeHtml(searchPreview)}`
+            : "Type any two or three things you can clearly see on the card."
+        }</div>
+      </div>
       <div class="button-row">
         <button class="button" type="button" data-action="search-ebay">Search eBay</button>
+        <button class="button button--ghost" type="button" data-action="open-ebay">Open eBay</button>
       </div>
       <div class="review-note">
         <strong>Closest eBay cards</strong>
@@ -1083,9 +1145,21 @@ function renderReviewPane(allCrops) {
                     `,
                   )
                   .join("")
-              : '<div class="small-copy">Nothing close popped up yet. Try the player name, year, set, or card number above.</div>'
+              : `
+                  <div class="review-note review-note--warning">
+                    <strong>No eBay card yet</strong>
+                    <div class="small-copy">The little picture above is your scan, not a match. Try the player name, year, set, or card number above.</div>
+                  </div>
+                `
           }
         </div>
+      </div>
+      <div class="review-focus__image">
+        <img src="${selected.crop.imageDataUrl}" alt="Selected card" decoding="async" />
+      </div>
+      <div class="review-note">
+        <strong>What the photo picked up</strong>
+        <div class="small-copy">${escapeHtml(describeReadText(selected.crop))}</div>
       </div>
       <div class="button-row">
         <button class="button button--primary" type="button" data-action="confirm">Save This Card</button>
@@ -1369,6 +1443,89 @@ function candidateDetailText(candidate) {
   return shortenText(detailText || candidate.priceText || "eBay card", 86);
 }
 
+function getManualDetails(crop) {
+  const inferred = inferManualDetails(crop?.ocrText || "", crop?.searchQuery || "");
+  return {
+    player: crop?.manualDetails?.player || inferred.player,
+    year: crop?.manualDetails?.year || inferred.year,
+    brandSet: crop?.manualDetails?.brandSet || inferred.brandSet,
+    cardNumber: crop?.manualDetails?.cardNumber || inferred.cardNumber,
+  };
+}
+
+function hasManualDetails(details) {
+  return Boolean(
+    String(details?.player || "").trim() ||
+      String(details?.year || "").trim() ||
+      String(details?.brandSet || "").trim() ||
+      String(details?.cardNumber || "").trim(),
+  );
+}
+
+function buildManualSearchFromDetails(details) {
+  return [
+    String(details?.year || "").trim(),
+    String(details?.brandSet || "").trim(),
+    String(details?.cardNumber || "").trim(),
+    String(details?.player || "").trim(),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferManualDetails(ocrText, searchQuery) {
+  const normalizedSearch = normalizeText(searchQuery || ocrText);
+  const year = normalizedSearch.match(/\b(19|20)\d{2}\b/)?.[0] || "";
+  const cardNumber = pickLikelyCardNumber(ocrText || searchQuery, year);
+  const player = inferPlayerName(ocrText);
+  const brandSet = inferBrandSet(normalizedSearch, year, cardNumber, player);
+
+  return {
+    player,
+    year,
+    brandSet,
+    cardNumber,
+  };
+}
+
+function inferPlayerName(ocrText) {
+  const cleanText = String(ocrText || "").replace(/[^\w\s'-]/g, " ");
+  const lines = cleanText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const likelyLine = lines.find((line) => {
+    const words = line.split(/\s+/).filter(Boolean);
+    return words.length >= 2 && words.length <= 4 && words.every((word) => /^[A-Z][a-z'-]+$/.test(word));
+  });
+
+  return likelyLine || "";
+}
+
+function inferBrandSet(normalizedSearch, year, cardNumber, player) {
+  const tokensToSkip = new Set(
+    [year, cardNumber, ...normalizeText(player).split(" "), "card"]
+      .filter(Boolean)
+      .map((token) => String(token).toLowerCase()),
+  );
+
+  return normalizedSearch
+    .split(" ")
+    .filter((token) => token && !tokensToSkip.has(token))
+    .slice(0, 4)
+    .join(" ")
+    .trim();
+}
+
+function pickLikelyCardNumber(sourceText, year) {
+  const matches = extractCardNumbers(sourceText).filter((token) => token && token !== year);
+  const nonYearMatch = matches.find((token) => !/^(19|20)\d{2}$/.test(token));
+  return nonYearMatch || matches[0] || "";
+}
+
 function findSelectedCandidate(crop) {
   if (!crop) {
     return null;
@@ -1392,7 +1549,13 @@ async function fetchCandidatesForCrop({ searchQuery, imageDataUrl } = {}) {
 }
 
 async function searchSelectedCropOnEbay(selected) {
-  const query = String(selected.crop.manualSearch || selected.crop.searchQuery || buildEbaySearchText(selected.crop.ocrText)).trim();
+  const details = getManualDetails(selected.crop);
+  const detailsQuery = buildManualSearchFromDetails(details);
+  const query = String(
+    hasManualDetails(details)
+      ? detailsQuery
+      : selected.crop.manualSearch || selected.crop.searchQuery || buildEbaySearchText(selected.crop.ocrText),
+  ).trim();
   if (!query && !selected.crop.imageDataUrl) {
     setStatus("Give eBay a few words first, like player, year, set, or card number.");
     return;
@@ -1423,6 +1586,17 @@ async function searchSelectedCropOnEbay(selected) {
     setStatus(`eBay search hit a snag. ${error.message}`);
     render();
   }
+}
+
+function openSelectedCropOnEbay(selected) {
+  const details = getManualDetails(selected.crop);
+  const query = buildManualSearchFromDetails(details) || selected.crop.manualSearch || selected.crop.searchQuery || "";
+  if (!query) {
+    setStatus("Add a player, year, set, or card number first, then open eBay.");
+    return;
+  }
+
+  window.open(buildEbayLiveSearchUrl(query), "_blank", "noreferrer");
 }
 
 function buildPricingFromCandidate(candidate) {

@@ -150,11 +150,34 @@ export async function detectCropsFromImage(dataUrl, mode) {
 
 export async function runOcr(dataUrl) {
   const tesseract = await waitForTesseract();
-  const result = await tesseract.recognize(dataUrl, OCR_LANGUAGE, {});
-  return {
-    text: cleanupOcrText(result?.data?.text || ""),
-    confidence: Number.isFinite(result?.data?.confidence) ? result.data.confidence / 100 : null,
+  const sourceImage = await loadImage(dataUrl).catch(() => null);
+  const firstPass = await recognizeOcrCandidate(tesseract, dataUrl, 0);
+  let bestCandidate = {
+    ...firstPass,
+    imageDataUrl: dataUrl,
   };
+
+  const likelySideways = sourceImage ? sourceImage.width > sourceImage.height * 1.04 : false;
+  const shouldTryMoreRotations = likelySideways || scoreOcrCandidate(bestCandidate) < 0.5;
+  if (!shouldTryMoreRotations) {
+    return bestCandidate;
+  }
+
+  const rotationPlan = likelySideways ? [90, 270, 180] : [180, 90, 270];
+  for (const angle of rotationPlan) {
+    const rotatedDataUrl = await rotateImageDataUrl(dataUrl, angle);
+    const candidate = await recognizeOcrCandidate(tesseract, rotatedDataUrl, angle);
+    const scoredCandidate = {
+      ...candidate,
+      imageDataUrl: rotatedDataUrl,
+    };
+
+    if (scoreOcrCandidate(scoredCandidate) > scoreOcrCandidate(bestCandidate) + 0.04) {
+      bestCandidate = scoredCandidate;
+    }
+  }
+
+  return bestCandidate;
 }
 
 async function detectPageCards(dataUrl) {
@@ -327,6 +350,68 @@ function cleanupOcrText(text) {
     .replace(/\s{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+async function recognizeOcrCandidate(tesseract, dataUrl, rotation) {
+  const result = await tesseract.recognize(dataUrl, OCR_LANGUAGE, {});
+  return {
+    text: cleanupOcrText(result?.data?.text || ""),
+    confidence: Number.isFinite(result?.data?.confidence) ? result.data.confidence / 100 : null,
+    rotation,
+  };
+}
+
+function scoreOcrCandidate(candidate) {
+  const cleaned = String(candidate?.text || "").trim();
+  const confidence = Number.isFinite(candidate?.confidence) ? candidate.confidence : 0;
+  if (!cleaned) {
+    return confidence * 0.2;
+  }
+
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  const readableWords = words.filter((word) => /[a-z]/i.test(word) && word.length >= 3).length;
+  const shortWords = words.filter((word) => word.length <= 2).length;
+  const yearHits = (cleaned.match(/\b(19|20)\d{2}\b/g) || []).length;
+  const cardNumberHits = (cleaned.match(/\b[a-z]{0,2}\d{1,4}[a-z]{0,2}\b/gi) || []).length;
+  const weirdChars = (cleaned.match(/[^a-z0-9\s#&.,:'"()/+-]/gi) || []).length;
+  const readableRatio = readableWords / Math.max(words.length, 1);
+  const shortPenalty = (shortWords / Math.max(words.length, 1)) * 0.18;
+  const weirdPenalty = Math.min(0.22, weirdChars / Math.max(cleaned.length, 1));
+
+  return (
+    confidence * 0.58 +
+    Math.min(0.2, readableRatio * 0.28) +
+    Math.min(0.1, yearHits * 0.05) +
+    Math.min(0.08, cardNumberHits * 0.04) +
+    Math.min(0.1, cleaned.length / 120) -
+    shortPenalty -
+    weirdPenalty
+  );
+}
+
+async function rotateImageDataUrl(dataUrl, angle) {
+  const normalizedAngle = ((angle % 360) + 360) % 360;
+  if (normalizedAngle === 0) {
+    return dataUrl;
+  }
+
+  const image = await loadImage(dataUrl);
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (normalizedAngle === 90 || normalizedAngle === 270) {
+    canvas.width = image.height;
+    canvas.height = image.width;
+  } else {
+    canvas.width = image.width;
+    canvas.height = image.height;
+  }
+
+  context.translate(canvas.width / 2, canvas.height / 2);
+  context.rotate((normalizedAngle * Math.PI) / 180);
+  context.drawImage(image, -image.width / 2, -image.height / 2);
+
+  return canvas.toDataURL("image/jpeg", 0.92);
 }
 
 function orderPoints(points) {
