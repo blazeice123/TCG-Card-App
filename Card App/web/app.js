@@ -40,7 +40,7 @@ const moneyFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
 
-const APP_VERSION = "v0.3.1";
+const APP_VERSION = "v0.3.2";
 
 const LIKELY_SET_TERMS = new Set([
   "topps",
@@ -574,11 +574,12 @@ async function handleScan() {
         ocrText: ocrResult.text,
       });
       const searchQuery = queryVariants[0] || buildEbaySearchText(ocrResult.text);
-      const candidates = await fetchCandidatesForCrop({
+      const lookupResult = await fetchCandidatesForCrop({
         searchQuery,
         imageDataUrl: finalCropImageDataUrl,
         fallbackQueries: queryVariants.slice(1),
       });
+      const candidates = lookupResult.candidates;
 
       session.crops.push({
         cropId: detectedCrop.cropId,
@@ -596,6 +597,17 @@ async function handleScan() {
         manualSearch: searchQuery,
         manualDetails: inferredDetails,
         searchQuery,
+        debugInfo: buildLookupDebugInfo({
+          searchReason: "scan",
+          primaryQuery: searchQuery,
+          queryVariants,
+          lookupResult,
+          ocrResult,
+          manualDetails: inferredDetails,
+          cropNote: [detectedCrop.note, ocrResult.rotation ? "We straightened the card before reading it." : ""]
+            .filter(Boolean)
+            .join(" "),
+        }),
         reviewStatus: "pending",
         unknownFlag: false,
         pricing: null,
@@ -715,6 +727,11 @@ async function handleReviewClick(event) {
 
   if (action === "open-ebay") {
     openSelectedCropOnEbay(selected);
+    return;
+  }
+
+  if (action === "copy-debug") {
+    await copyCropDebugInfo(selected);
     return;
   }
 
@@ -1206,8 +1223,22 @@ function renderReviewPane(allCrops) {
         <button class="button button--primary" type="button" data-action="confirm">Save This Card</button>
         <button class="button button--ghost" type="button" data-action="unknown">Save for Later</button>
       </div>
+      ${renderDebugCard(selected.crop)}
       ${renderPricingBox(selected.crop, currentCard)}
     </div>
+  `;
+}
+
+function renderDebugCard(crop) {
+  const debugText = formatDebugInfo(crop);
+  return `
+    <details class="debug-card" open>
+      <summary>Debug Info To Copy</summary>
+      <pre class="debug-card__block">${escapeHtml(debugText)}</pre>
+      <div class="button-row">
+        <button class="button button--ghost" type="button" data-action="copy-debug">Copy Debug Info</button>
+      </div>
+    </details>
   `;
 }
 
@@ -1629,11 +1660,16 @@ function findSelectedCandidate(crop) {
 async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueries = [] } = {}) {
   const queryQueue = uniqueQueries([searchQuery, ...fallbackQueries]);
   if (!queryQueue.length && !imageDataUrl) {
-    return [];
+    return {
+      candidates: [],
+      attempts: [],
+      queryQueue: [],
+    };
   }
 
   const merged = [];
   const seen = new Set();
+  const attempts = [];
 
   if (!queryQueue.length && imageDataUrl) {
     const matchData = await fetchEbayMatches({
@@ -1641,7 +1677,12 @@ async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueri
       imageDataUrl,
       limit: 6,
     });
-    return matchData.candidates || [];
+    attempts.push(buildLookupAttempt("", matchData, true));
+    return {
+      candidates: matchData.candidates || [],
+      attempts,
+      queryQueue,
+    };
   }
 
   for (let index = 0; index < queryQueue.length; index += 1) {
@@ -1651,6 +1692,7 @@ async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueri
       imageDataUrl: index === 0 ? imageDataUrl : "",
       limit: 6,
     });
+    attempts.push(buildLookupAttempt(query, matchData, index === 0 && Boolean(imageDataUrl)));
 
     (matchData.candidates || []).forEach((candidate) => {
       const key = candidate.itemWebUrl || candidate.catalogCardId || candidate.title;
@@ -1667,7 +1709,11 @@ async function fetchCandidatesForCrop({ searchQuery, imageDataUrl, fallbackQueri
     }
   }
 
-  return merged.slice(0, 6);
+  return {
+    candidates: merged.slice(0, 6),
+    attempts,
+    queryQueue,
+  };
 }
 
 async function searchSelectedCropOnEbay(selected) {
@@ -1684,13 +1730,27 @@ async function searchSelectedCropOnEbay(selected) {
   render();
 
   try {
-    const candidates = await fetchCandidatesForCrop({
+    const lookupResult = await fetchCandidatesForCrop({
       searchQuery: query,
       imageDataUrl: selected.crop.imageDataUrl,
       fallbackQueries: queryVariants.slice(1),
     });
+    const candidates = lookupResult.candidates;
     selected.crop.matchCandidates = candidates;
     selected.crop.selectedCatalogCardId = candidates[0]?.catalogCardId || "";
+    selected.crop.debugInfo = buildLookupDebugInfo({
+      searchReason: "review",
+      primaryQuery: query,
+      queryVariants,
+      lookupResult,
+      ocrResult: {
+        text: selected.crop.ocrText || "",
+        confidence: selected.crop.ocrConfidence,
+        error: selected.crop.ocrError || "",
+      },
+      manualDetails: getManualDetails(selected.crop),
+      cropNote: selected.crop.note || "",
+    });
     saveState(state);
     setStatus(
       candidates.length
@@ -1729,6 +1789,95 @@ function buildPricingFromCandidate(candidate) {
       : "Based on recent eBay sales.",
     comparableListings: candidate.comparableListings || [],
   };
+}
+
+function buildLookupAttempt(query, matchData, usedImage) {
+  const candidates = matchData?.candidates || [];
+  return {
+    query: query || "(photo only)",
+    usedImage,
+    source: matchData?.source || "",
+    note: matchData?.note || "",
+    candidateCount: candidates.length,
+    topTitles: candidates.slice(0, 3).map((candidate) => candidate.title || candidate.playerName || "").filter(Boolean),
+  };
+}
+
+function buildLookupDebugInfo({ searchReason, primaryQuery, queryVariants, lookupResult, ocrResult, manualDetails, cropNote }) {
+  return {
+    version: APP_VERSION,
+    searchedAt: new Date().toISOString(),
+    searchReason,
+    primaryQuery,
+    queryVariants,
+    queryQueue: lookupResult?.queryQueue || [],
+    attempts: lookupResult?.attempts || [],
+    ocrText: ocrResult?.text || "",
+    ocrConfidence: ocrResult?.confidence,
+    ocrError: ocrResult?.error || "",
+    manualDetails,
+    cropNote: cropNote || "",
+    finalCandidateCount: lookupResult?.candidates?.length || 0,
+    finalCandidates: (lookupResult?.candidates || []).slice(0, 5).map((candidate) => ({
+      title: candidate.title || candidate.playerName || "",
+      price: candidate.priceText || "",
+      confidence: candidate.confidenceScore,
+    })),
+  };
+}
+
+function formatDebugInfo(crop) {
+  const debug = crop?.debugInfo || {};
+  const selectedCandidate = findSelectedCandidate(crop);
+  const preferredQuery = getPreferredSearchText(crop);
+  const liveSearchUrl = preferredQuery ? buildEbayLiveSearchUrl(preferredQuery) : "";
+  const attemptLines = (debug.attempts || []).length
+    ? debug.attempts
+        .map(
+          (attempt, index) =>
+            `${index + 1}. query="${attempt.query}" | image=${attempt.usedImage ? "yes" : "no"} | source=${attempt.source || "-"} | count=${attempt.candidateCount} | note=${attempt.note || "-"}${attempt.topTitles?.length ? ` | top=${attempt.topTitles.join(" || ")}` : ""}`,
+        )
+        .join("\n")
+    : "none";
+  const finalCandidateLines = (crop?.matchCandidates || []).length
+    ? crop.matchCandidates
+        .slice(0, 5)
+        .map(
+          (candidate, index) =>
+            `${index + 1}. ${candidate.title || candidate.playerName || "Unknown"} | ${candidate.priceText || "-"} | ${(candidate.confidenceScore * 100).toFixed(0)}%`,
+        )
+        .join("\n")
+    : "none";
+
+  return [
+    `Build: ${APP_VERSION}`,
+    `When copied: ${new Date().toISOString()}`,
+    `Last search run: ${debug.searchedAt || "-"}`,
+    `Search reason: ${debug.searchReason || "-"}`,
+    `Preferred search text: ${preferredQuery || "-"}`,
+    `Primary query used: ${debug.primaryQuery || "-"}`,
+    `Query variants: ${(debug.queryVariants || []).join(" | ") || "-"}`,
+    `Selected match: ${selectedCandidate?.title || "-"}`,
+    `Candidate count: ${crop?.matchCandidates?.length || 0}`,
+    `OCR confidence: ${Number.isFinite(crop?.ocrConfidence) ? `${Math.round(crop.ocrConfidence * 100)}%` : "-"}`,
+    `OCR error: ${crop?.ocrError || "-"}`,
+    `OCR text: ${crop?.ocrText || "-"}`,
+    `Crop note: ${crop?.note || debug.cropNote || "-"}`,
+    `Manual details: player="${debug.manualDetails?.player || ""}" | year="${debug.manualDetails?.year || ""}" | brandSet="${debug.manualDetails?.brandSet || ""}" | cardNumber="${debug.manualDetails?.cardNumber || ""}"`,
+    `Open eBay URL: ${liveSearchUrl || "-"}`,
+    `Lookup attempts:\n${attemptLines}`,
+    `Final candidates:\n${finalCandidateLines}`,
+  ].join("\n");
+}
+
+async function copyCropDebugInfo(selected) {
+  const debugText = formatDebugInfo(selected.crop);
+  try {
+    await navigator.clipboard.writeText(debugText);
+    setStatus("Copied the debug info. Paste it here and I can dig in faster.");
+  } catch (error) {
+    setStatus("Could not copy automatically. You can still select the debug box text and paste it here.");
+  }
 }
 
 function setStatus(message) {

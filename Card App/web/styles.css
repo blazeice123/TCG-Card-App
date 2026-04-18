@@ -870,6 +870,35 @@ textarea::placeholder {
   gap: 10px;
 }
 
+.debug-card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 12px;
+}
+
+.debug-card summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-soft);
+}
+
+.debug-card__block {
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(5, 10, 24, 0.34);
+  border: 1px solid var(--line);
+  color: var(--text-soft);
+  font-size: 0.7rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+}
+
 .pricing-stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
